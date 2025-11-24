@@ -1,0 +1,6 @@
+open|1.0s
+stinke|1.0s
+open|1.0s
+SLEEP:1.0s
+SLEEP:1.0s
+open_joined|1.0s
