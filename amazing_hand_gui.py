@@ -1011,6 +1011,7 @@ class AmazingHandGUI:
         self.max_data_points = 100
         self.rolling_chart = True  # Rolling window mode
         self.time_data = []
+        self.time_axis_data = []  # Cached matplotlib date numbers for each sample
         self.servo_data = {
             'target_pos': [[] for _ in range(8)],
             'current_pos': [[] for _ in range(8)],
@@ -1022,6 +1023,9 @@ class AmazingHandGUI:
         }
         self.start_time = time.time()
         self.time_formatter = mdates.DateFormatter('%H:%M:%S')
+        self.servo_colors = plt.cm.tab10(np.linspace(0, 1, 8))
+        self.chart_lines = {}
+        self.chart_status_text = None
         self.latest_actual_positions = None
         self.latest_actual_timestamp = 0.0
         self.actual_pos_lock = threading.Lock()
@@ -1438,18 +1442,22 @@ class AmazingHandGUI:
         attach_tooltip(mode_combo, "Switch between multi-servo view and single-servo oscilloscope style view.")
         mode_combo.bind('<<ComboboxSelected>>', lambda _e: self._on_chart_mode_change())
         self.chart_mode.trace_add('write', lambda *_: self._on_chart_mode_change())
-        ttk.Label(mode_frame, text="Scope Servo:").pack(side='left', padx=(0,4))
-        scope_combo = ttk.Combobox(
+        self.scope_servo_label_pack = {'side': 'left', 'padx': (0, 4)}
+        self.scope_servo_label = ttk.Label(mode_frame, text="Scope Servo:")
+        self.scope_servo_label.pack(**self.scope_servo_label_pack)
+        self.scope_servo_combo = ttk.Combobox(
             mode_frame,
             textvariable=self.scope_servo_var,
             values=[str(i) for i in range(1, 9)],
             width=4,
             state='readonly'
         )
-        scope_combo.pack(side='left', padx=(0,8))
-        attach_tooltip(scope_combo, "Servo channel used for scope view and feedback panel.")
-        scope_combo.bind('<<ComboboxSelected>>', lambda _e: self._on_scope_servo_change())
+        self.scope_servo_combo_pack = {'side': 'left', 'padx': (0, 8)}
+        self.scope_servo_combo.pack(**self.scope_servo_combo_pack)
+        attach_tooltip(self.scope_servo_combo, "Servo channel used for scope view and feedback panel.")
+        self.scope_servo_combo.bind('<<ComboboxSelected>>', lambda _e: self._on_scope_servo_change())
         self.scope_servo_var.trace_add('write', lambda *_: self._on_scope_servo_change())
+        self._update_scope_servo_visibility()
         
         # Servo selection
         servos_label = ttk.Label(mode_frame, text="Servos:")
@@ -1542,6 +1550,8 @@ class AmazingHandGUI:
         self.ax.xaxis.set_major_formatter(self.time_formatter)
         self.ax.tick_params(axis='x', labelrotation=15)
         self.ax.xaxis_date()
+        self.ax.grid(True, alpha=0.3)
+        self._ensure_chart_message_artist()
         
         self.canvas = FigureCanvasTkAgg(self.fig, chart_plot_frame)
         canvas_widget = self.canvas.get_tk_widget()
@@ -1678,10 +1688,27 @@ class AmazingHandGUI:
         self.feedback_update_pending = False
         self.update_feedback_panel()
 
+    def _update_scope_servo_visibility(self):
+        """Show scope servo selector only when scope mode is active."""
+        visible = self.chart_mode.get() == 'Scope'
+        label = getattr(self, 'scope_servo_label', None)
+        combo = getattr(self, 'scope_servo_combo', None)
+        if visible:
+            if label and not label.winfo_manager():
+                label.pack(**getattr(self, 'scope_servo_label_pack', {}))
+            if combo and not combo.winfo_manager():
+                combo.pack(**getattr(self, 'scope_servo_combo_pack', {}))
+        else:
+            if label and label.winfo_manager():
+                label.pack_forget()
+            if combo and combo.winfo_manager():
+                combo.pack_forget()
+
     def _on_chart_mode_change(self):
         """Handle chart mode combo box changes."""
         mode = self.chart_mode.get()
         self.status_var.set(f"Chart mode: {mode}")
+        self._update_scope_servo_visibility()
         self.update_chart()
 
     def _on_scope_servo_change(self):
@@ -1950,12 +1977,18 @@ class AmazingHandGUI:
                 # Only add time point if at least one servo succeeded
                 if success:
                     self.time_data.append(current_time)
+                    axis_value = mdates.date2num(datetime.fromtimestamp(self.start_time + current_time))
+                    self.time_axis_data.append(axis_value)
                     self._request_feedback_refresh()
                     
                     # Keep only recent data if rolling mode is enabled
                     if self.rolling_chart and len(self.time_data) > self.max_data_points:
                         points_to_remove = len(self.time_data) - self.max_data_points
                         self.time_data = self.time_data[points_to_remove:]
+                        if len(self.time_axis_data) >= points_to_remove:
+                            self.time_axis_data = self.time_axis_data[points_to_remove:]
+                        else:
+                            self.time_axis_data = []
                         for key in self.servo_data:
                             for idx in range(8):
                                 if len(self.servo_data[key][idx]) > points_to_remove:
@@ -2039,12 +2072,64 @@ class AmazingHandGUI:
             self.log(f"Disconnect error: {e}")
             self.status_var.set(f"Disconnect error: {e}")
     
-    def _time_slice_to_axis(self, time_slice):
+    def _time_slice_to_axis(self, time_slice, start_idx=None, end_idx=None):
         """Convert relative time values to matplotlib date numbers."""
+        if start_idx is not None and end_idx is not None:
+            cache_len = len(self.time_axis_data)
+            if cache_len >= end_idx:
+                return self.time_axis_data[start_idx:end_idx]
         if not time_slice:
             return []
         absolute = [datetime.fromtimestamp(self.start_time + t) for t in time_slice]
         return mdates.date2num(absolute)
+
+    def _ensure_chart_message_artist(self):
+        """Create (or return) the status text artist used for chart messages."""
+        if self.chart_status_text is None:
+            self.chart_status_text = self.ax.text(
+                0.5, 0.5, '',
+                ha='center', va='center', transform=self.ax.transAxes,
+                color='#666666', fontsize=11, fontweight='bold'
+            )
+            self.chart_status_text.set_visible(False)
+        return self.chart_status_text
+
+    def _show_chart_message(self, message):
+        text_artist = self._ensure_chart_message_artist()
+        text_artist.set_text(message)
+        text_artist.set_visible(True)
+
+    def _hide_chart_message(self):
+        if self.chart_status_text is not None:
+            self.chart_status_text.set_visible(False)
+
+    def _update_chart_line(self, key, times, values, label, color, linestyle='-', alpha=1.0, drawstyle='default'):
+        if len(times) == 0 or len(values) == 0:
+            return None
+        line = self.chart_lines.get(key)
+        if line is None:
+            line, = self.ax.plot([], [])
+            self.chart_lines[key] = line
+        line.set_data(times, values)
+        line.set_color(color)
+        line.set_linestyle(linestyle)
+        line.set_alpha(alpha)
+        line.set_label(label)
+        line.set_drawstyle(drawstyle)
+        line.set_visible(True)
+        return line
+
+    def _hide_unused_chart_lines(self, active_keys):
+        if not self.chart_lines:
+            return
+        for key, line in self.chart_lines.items():
+            if key not in active_keys:
+                line.set_visible(False)
+
+    def _remove_chart_legend(self):
+        legend = self.ax.get_legend()
+        if legend is not None:
+            legend.remove()
 
     def _apply_chart_limits(self, values):
         """Apply custom zoom/offset to Y-axis based on plotted values."""
@@ -2155,150 +2240,183 @@ class AmazingHandGUI:
             if self.chart_paused:
                 return
             
-            self.ax.clear()
-            self.ax.xaxis.set_major_formatter(self.time_formatter)
-            self.ax.tick_params(axis='x', labelrotation=15)
-            
-            # Get list of selected metrics
             selected_metrics = [key for key, var in self.chart_metrics.items() if var.get()]
             if not selected_metrics:
-                self.ax.text(0.5, 0.5, 'No metrics selected',
-                           ha='center', va='center', transform=self.ax.transAxes)
-                self.canvas.draw()
+                self._hide_unused_chart_lines(set())
+                self._remove_chart_legend()
+                self._show_chart_message('Select at least one metric')
+                self.canvas.draw_idle()
                 return
-            
-            colors = plt.cm.tab10(np.linspace(0, 1, 8))
-            plotted_values = []
-            
-            # Check if we have any data
+
             if len(self.time_data) == 0:
-                self.ax.text(0.5, 0.5, 'Waiting for data...', 
-                           ha='center', va='center', transform=self.ax.transAxes)
-                self.canvas.draw()
+                self._hide_unused_chart_lines(set())
+                self._remove_chart_legend()
+                self._show_chart_message('Waiting for data...')
+                self.canvas.draw_idle()
                 return
 
             start_idx, end_idx = self._get_time_window_indices()
             if end_idx - start_idx < 2:
                 start_idx = max(0, len(self.time_data) - 2)
                 end_idx = len(self.time_data)
+            if end_idx <= start_idx:
+                self._hide_unused_chart_lines(set())
+                self._remove_chart_legend()
+                self._show_chart_message('Waiting for data...')
+                self.canvas.draw_idle()
+                return
+
             time_slice = self.time_data[start_idx:end_idx]
             if len(time_slice) == 0:
-                self.ax.text(0.5, 0.5, 'Waiting for data...', 
-                           ha='center', va='center', transform=self.ax.transAxes)
-                self.canvas.draw()
+                self._hide_unused_chart_lines(set())
+                self._remove_chart_legend()
+                self._show_chart_message('Waiting for data...')
+                self.canvas.draw_idle()
                 return
-            base_plot_times = self._time_slice_to_axis(time_slice)
+
+            base_plot_times = self._time_slice_to_axis(time_slice, start_idx, end_idx)
+            if len(base_plot_times) == 0:
+                self._hide_unused_chart_lines(set())
+                self._remove_chart_legend()
+                self._show_chart_message('Waiting for data...')
+                self.canvas.draw_idle()
+                return
+
+            x_start = base_plot_times[0]
+            x_end = base_plot_times[-1]
+            if x_end <= x_start:
+                x_end = x_start + 1 / 86400.0  # add one second in Matplotlib date units
+            self.ax.set_xlim(x_start, x_end)
+
             def _plot_times_for_length(count):
-                if count == len(time_slice):
-                    return base_plot_times
                 if count <= 0:
                     return []
-                subset = time_slice[-count:]
-                return self._time_slice_to_axis(subset)
-            
-            # Process each selected metric
+                if count == len(base_plot_times):
+                    return base_plot_times
+                return base_plot_times[-count:]
+
+            plotted_values = []
+            active_line_keys = []
+            labels_lookup = {
+                'current_pos': 'Position (degrees)',
+                'target_vs_current': 'Position (degrees)',
+                'load': 'Load / Torque (%)',
+                'speed': 'Speed (°/s)',
+                'temperature': 'Temperature (°C)',
+                'voltage': 'Voltage (V)',
+                'moving': 'Moving Flag (0/1)'
+            }
+
             for metric in selected_metrics:
                 if metric == 'target_vs_current':
-                    # Show target and current for visible servos
                     for i in range(8):
                         if not self.servo_visible[i].get():
                             continue
-                        if len(self.servo_data['current_pos'][i]) == 0:
-                            continue
-                        
                         if len(self.servo_data['current_pos'][i]) < end_idx:
                             continue
                         if len(self.servo_data['target_pos'][i]) < end_idx:
                             continue
                         current_slice = self.servo_data['current_pos'][i][start_idx:end_idx]
                         target_slice = self.servo_data['target_pos'][i][start_idx:end_idx]
-                        if len(current_slice) == 0:
+                        if not current_slice:
                             continue
                         plot_times = _plot_times_for_length(len(current_slice))
+                        if len(plot_times) != len(current_slice):
+                            continue
                         plotted_values.extend(current_slice)
                         plotted_values.extend(target_slice)
-                        
-                        self.ax.plot(plot_times, current_slice, 
-                                   label=f'S{i+1} Current', color=colors[i], linestyle='-')
-                        self.ax.plot(plot_times, target_slice,
-                                   label=f'S{i+1} Target', color=colors[i], linestyle='--', alpha=0.5)
-                
+
+                        cur_key = ('target_vs_current', i, 'current')
+                        tgt_key = ('target_vs_current', i, 'target')
+                        cur_line = self._update_chart_line(
+                            cur_key, plot_times, current_slice,
+                            f'S{i+1} Current', self.servo_colors[i], linestyle='-', alpha=1.0
+                        )
+                        tgt_line = self._update_chart_line(
+                            tgt_key, plot_times, target_slice,
+                            f'S{i+1} Target', self.servo_colors[i], linestyle='--', alpha=0.5
+                        )
+                        if cur_line:
+                            active_line_keys.append(cur_key)
+                        if tgt_line:
+                            active_line_keys.append(tgt_key)
                 else:
-                    # Show single metric for visible servos
                     data_key = metric
-                    labels = {
-                        'current_pos': 'Position (degrees)',
-                        'load': 'Load / Torque (%)',
-                        'speed': 'Speed (°/s)',
-                        'temperature': 'Temperature (°C)',
-                        'voltage': 'Voltage (V)',
-                        'moving': 'Moving Flag (0/1)'
-                    }
-                    
                     for i in range(8):
                         if not self.servo_visible[i].get():
                             continue
-                        if len(self.servo_data[data_key][i]) == 0:
-                            continue
-                        
                         if len(self.servo_data[data_key][i]) < end_idx:
                             continue
                         data_slice = self.servo_data[data_key][i][start_idx:end_idx]
-                        if len(data_slice) == 0:
+                        if not data_slice:
                             continue
                         plot_times = _plot_times_for_length(len(data_slice))
+                        if len(plot_times) != len(data_slice):
+                            continue
                         plotted_values.extend(data_slice)
-                        
-                        # Build label with metric info if multiple metrics selected
+
                         if len(selected_metrics) > 1:
-                            label_prefix = labels.get(data_key, data_key).split('(')[0].strip()[:4]
+                            label_prefix = labels_lookup.get(data_key, data_key).split('(')[0].strip()[:4]
                             servo_label = f'{label_prefix} S{i+1}'
                         else:
                             servo_label = f'Servo {i+1}'
-                        
-                        if data_key == 'moving':
-                            self.ax.step(plot_times, data_slice,
-                                         where='post', label=servo_label, color=colors[i])
-                        else:
-                            self.ax.plot(plot_times, data_slice,
-                                       label=servo_label, color=colors[i])
-            
-            # Set labels based on selected metrics
+
+                        drawstyle = 'steps-post' if data_key == 'moving' else 'default'
+                        line_key = (data_key, i)
+                        line = self._update_chart_line(
+                            line_key, plot_times, data_slice,
+                            servo_label, self.servo_colors[i], linestyle='-', alpha=1.0,
+                            drawstyle=drawstyle
+                        )
+                        if line:
+                            active_line_keys.append(line_key)
+
+            active_line_set = set(active_line_keys)
+            self._hide_unused_chart_lines(active_line_set)
+
+            if not active_line_keys:
+                self._remove_chart_legend()
+                self._show_chart_message('No visible data')
+                self.canvas.draw_idle()
+                return
+
+            self._hide_chart_message()
+
             if len(selected_metrics) == 1:
                 metric = selected_metrics[0]
-                labels_map = {
-                    'current_pos': 'Position (degrees)',
-                    'target_vs_current': 'Position (degrees)',
-                    'load': 'Load / Torque (%)',
-                    'speed': 'Speed (°/s)',
-                    'temperature': 'Temperature (°C)',
-                    'voltage': 'Voltage (V)',
-                    'moving': 'Moving Flag (0/1)'
-                }
-                self.ax.set_ylabel(labels_map.get(metric, metric))
+                self.ax.set_ylabel(labels_lookup.get(metric, metric))
                 title_map = {
                     'target_vs_current': 'Target vs Current Position'
                 }
-                self.ax.set_title(title_map.get(metric, labels_map.get(metric, metric)))
+                self.ax.set_title(title_map.get(metric, labels_lookup.get(metric, metric)))
             else:
                 self.ax.set_ylabel('Multiple Metrics')
                 self.ax.set_title('Multi-Metric View')
-            
+
             if 'moving' in selected_metrics and len(selected_metrics) == 1:
                 self.ax.set_ylim(-0.2, 1.2)
             else:
                 self._apply_chart_limits(plotted_values)
-            
-            # Remove X margins, add Y margins
+
             self.ax.margins(x=0, y=0.1)
-            
-            # Only add legend if there are labeled lines
-            if self.ax.get_legend_handles_labels()[0]:
-                self.ax.legend(loc='upper right', fontsize=8, ncol=2)
-            
-            self.ax.grid(True, alpha=0.3)
-            
-            self.canvas.draw()
+
+            handles = []
+            labels = []
+            for key in active_line_keys:
+                line = self.chart_lines.get(key)
+                if not line or not line.get_visible():
+                    continue
+                label = line.get_label()
+                if not label or label.startswith('_'):
+                    continue
+                handles.append(line)
+                labels.append(label)
+            if handles:
+                self.ax.legend(handles, labels, loc='upper right', fontsize=8, ncol=2)
+            else:
+                self._remove_chart_legend()
+
+            self.canvas.draw_idle()
         
         except Exception as e:
             print(f"Chart update error: {e}")
@@ -2325,6 +2443,7 @@ class AmazingHandGUI:
     def clear_chart_data(self):
         """Clear all chart data."""
         self.time_data = []
+        self.time_axis_data = []
         for key in self.servo_data:
             for idx in range(8):
                 self.servo_data[key][idx] = []
