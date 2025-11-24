@@ -193,10 +193,10 @@ python amazing_hand_cmd.py --interactive
 
 Available interactive commands:
 
-- `set <servo_id> <position_deg> [speed]`  Set servo position
-- `read <servo_id>`  Read current position
-- `enable <servo_id> [1|0]`  Enable/disable torque
-- `quit` / `exit` / `q`  Exit interactive mode
+- `set <servo_id> <position_deg> [speed]` - Set servo position
+- `read <servo_id>` - Read current position
+- `enable <servo_id> [1|0]` - Enable/disable torque
+- `quit` / `exit` / `q` - Exit interactive mode
 
 ---
 
