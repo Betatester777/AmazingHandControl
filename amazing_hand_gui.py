@@ -106,6 +106,8 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+
+APP_VERSION = "0.7"
 from datetime import datetime
 import yaml
 
@@ -997,7 +999,7 @@ class AmazingHandGUI:
         if port is None:
             port = default_serial_port()
         self.root = tk.Tk()
-        self.root.title("AmazingHand Controller")
+        self.root.title(f"AmazingHand Controller v{APP_VERSION}")
         self.root.geometry("1400x800")
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
@@ -1107,7 +1109,7 @@ class AmazingHandGUI:
         
         # Title
         ttk.Label(
-            left_frame, text="AmazingHand Controller",
+            left_frame, text=f"AmazingHand Controller v{APP_VERSION}",
             font=('Arial', 16, 'bold')
         ).grid(row=0, column=0, columnspan=6, pady=10)
         
@@ -1187,7 +1189,7 @@ class AmazingHandGUI:
         attach_tooltip(self.connect_btn, "Connect to the hand controller.")
         
         self.disconnect_btn = ttk.Button(
-            conn_row, text="⏹ Disconnect", command=self.disconnect_controller, width=10
+            conn_row, text="⏹ Disconnect", command=self.disconnect_controller, width=14
         )
         self.disconnect_btn.pack(side='left', padx=2)
         self.disconnect_btn.state(['disabled'])
