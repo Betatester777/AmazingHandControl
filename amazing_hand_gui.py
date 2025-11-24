@@ -662,6 +662,9 @@ class AmazingHandGUI:
             'voltage': [[] for _ in range(8)]
         }
         self.start_time = time.time()
+        self.latest_actual_positions = None
+        self.latest_actual_timestamp = 0.0
+        self.actual_pos_lock = threading.Lock()
         
         # Sequence control flags
         self.stop_sequence = False
@@ -1057,6 +1060,11 @@ class AmazingHandGUI:
                         current_pos = np.rad2deg(current_pos_rad)
                         if servo_id % 2 == 0:
                             current_pos = -current_pos
+                        with self.actual_pos_lock:
+                            if self.latest_actual_positions is None:
+                                self.latest_actual_positions = [0] * 8
+                            self.latest_actual_positions[idx] = int(round(current_pos))
+                            self.latest_actual_timestamp = time.time()
                         
                         # Read load (force)
                         load = self.controller.read_present_load(servo_id)
@@ -2183,9 +2191,14 @@ class AmazingHandGUI:
         self._log_pose_completion(name, positions)
 
     def _read_actual_positions(self):
-        """Read current servo positions in degrees; returns None if unavailable."""
+        """Return the latest measured servo positions, if available."""
+        with self.actual_pos_lock:
+            if self.latest_actual_positions is not None:
+                return list(self.latest_actual_positions)
+
         if not self.connected or self.controller is None:
-            return self._snapshot_current_positions()
+            return None
+
         readings = []
         try:
             for servo_id in range(1, 9):
@@ -2196,27 +2209,22 @@ class AmazingHandGUI:
                 if servo_id % 2 == 0:
                     deg = -deg
                 readings.append(int(round(deg)))
+            with self.actual_pos_lock:
+                self.latest_actual_positions = list(readings)
+                self.latest_actual_timestamp = time.time()
             return readings
         except Exception:
-            return self._snapshot_current_positions()
+            return None
 
     def _log_pose_completion(self, name, target_positions):
         """Write target vs. actual servo positions to the log."""
         target_repr = '[' + ', '.join(str(p) for p in target_positions) + ']'
         actual_positions = self._read_actual_positions()
         if actual_positions is None:
-            actual_repr = '<unavailable>'
+            actual_repr = '<not connected>'
         else:
             actual_repr = '[' + ', '.join(str(int(p)) for p in actual_positions) + ']'
         self.log(f"Pose '{name}' complete → target={target_repr} current={actual_repr}")
-
-    def _snapshot_current_positions(self):
-        """Return the GUI's current slider positions for all servos."""
-        snapshot = []
-        for finger in self.fingers:
-            pos1, pos2 = finger.get_positions()
-            snapshot.extend([pos1, pos2])
-        return snapshot
     
     def log(self, message):
         """Add message to log output with timestamp."""
