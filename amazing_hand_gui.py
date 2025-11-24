@@ -2250,6 +2250,12 @@ class AmazingHandGUI:
             actual_repr = '<not connected>'
         else:
             actual_repr = '[' + ', '.join(str(int(p)) for p in actual_positions) + ']'
+            # Check if servos reached targets (within 5 degrees tolerance)
+            if actual_positions:
+                max_error = max(abs(target_positions[i] - actual_positions[i]) for i in range(min(len(target_positions), len(actual_positions))))
+                if max_error > 5:
+                    self.log(f"⚠ WARNING: Servos did not reach target! Max error: {max_error:.0f}°")
+                    self.log(f"  This may indicate: mechanical limits, servo configuration limits, or insufficient torque")
         self.log(f"Pose '{name}' complete → target={target_repr} current={actual_repr}")
     
     def log(self, message):
