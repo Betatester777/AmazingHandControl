@@ -1,0 +1,58 @@
+# AmazingHand GUI Configuration
+
+# Serial port settings
+serial:
+  # Default serial port for Windows/Linux
+  port_windows: COM9
+  port_linux: /dev/ttyACM0
+  # Communication baudrate
+  baudrate: 1000000
+  # Available baudrate options
+  baudrate_options: [9600, 115200, 1000000]
+
+# Servo configuration
+servos:
+  # Finger assignments: [servo1_id, servo2_id]
+  # servo1 = position (odd ID), servo2 = side offset (even ID)
+  pointer: [1, 2]
+  middle: [3, 4]
+  ring: [5, 6]
+  thumb: [7, 8]
+  
+  # All servo IDs in use
+  all_ids: [1, 2, 3, 4, 5, 6, 7, 8]
+
+# Servo angle limits (degrees)
+limits:
+  # Range for raw servo positions
+  servo_min: -40
+  servo_max: 110
+  
+  # Range for auto mode base position (close/open)
+  base_min: 0
+  base_max: 110
+  
+  # Range for auto mode side offset (left/right)
+  side_min: -40
+  side_max: 40
+
+# Default speeds (1-6 scale)
+speeds:
+  default: 3
+  min: 1
+  max: 6
+
+# Auto mode interpolation extremes
+# Format: [servo1, servo2] positions for each extreme pose
+auto_extremes:
+  left_open: [32, -40]
+  right_open: [-40, 32]
+  left_closed: [110, 110]
+  right_closed: [110, 110]
+  center_open: [0, 0]
+  center_closed: [110, 110]
+
+# Data file paths
+paths:
+  # Poses + sequences storage
+  poses_sequences_file: data/hand_config.yaml
