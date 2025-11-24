@@ -2,6 +2,8 @@
 
 Python GUI and command-line tools to control the AmazingHand robot using Feetech SCS0009 servos via a serial bus controller (e.g. Waveshare USB adapter).
 
+This project is designed for the [AmazingHand](https://github.com/pollen-robotics/AmazingHand) by Pollen Robotics.
+
 ### Requirements
 
 - Python 3.9 or newer (Tkinter must be included for the GUI)
