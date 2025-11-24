@@ -195,14 +195,6 @@ The GUI and CLI automatically validate:
 
 Invalid names will be rejected with error message showing forbidden characters.
 
-## Migration from CSV
-
-If you have old CSV files, the format has changed:
-- **Old**: CSV with `scene,pos1,...,pos8,speed` format
-- **New**: YAML with positions only (speeds per sequence, not per pose)
-- Speeds moved from poses to individual sequence steps
-- Loop setting moved from YAML to GUI checkbox
-
 ## License
 
 Copyright 2025 AmazingHand Control Contributors
