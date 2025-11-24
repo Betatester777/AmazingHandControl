@@ -2185,7 +2185,7 @@ class AmazingHandGUI:
     def _read_actual_positions(self):
         """Read current servo positions in degrees; returns None if unavailable."""
         if not self.connected or self.controller is None:
-            return None
+            return self._snapshot_current_positions()
         readings = []
         try:
             for servo_id in range(1, 9):
@@ -2198,7 +2198,7 @@ class AmazingHandGUI:
                 readings.append(int(round(deg)))
             return readings
         except Exception:
-            return None
+            return self._snapshot_current_positions()
 
     def _log_pose_completion(self, name, target_positions):
         """Write target vs. actual servo positions to the log."""
@@ -2209,6 +2209,14 @@ class AmazingHandGUI:
         else:
             actual_repr = '[' + ', '.join(str(int(p)) for p in actual_positions) + ']'
         self.log(f"Pose '{name}' complete → target={target_repr} current={actual_repr}")
+
+    def _snapshot_current_positions(self):
+        """Return the GUI's current slider positions for all servos."""
+        snapshot = []
+        for finger in self.fingers:
+            pos1, pos2 = finger.get_positions()
+            snapshot.extend([pos1, pos2])
+        return snapshot
     
     def log(self, message):
         """Add message to log output with timestamp."""
