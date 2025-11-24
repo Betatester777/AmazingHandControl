@@ -1,0 +1,38 @@
+poses:
+  open:
+    positions: [0, 0, 0, 0, 0, 0, 0, 0]
+  close:
+    positions: [110, 110, 110, 110, 110, 110, 110, 110]
+  half:
+    positions: [70, 70, 70, 70, 70, 70, 70, 70]
+  ok:
+    positions: [80, 80, 0, 0, 0, 0, 110, 30]
+  stinke:
+    positions: [110, 110, 0, 0, 110, 110, 110, 110]
+  open_joined:
+    positions: [-25, 25, 0, 0, 25, -25, 25, -25]
+  close_joined:
+    positions: [70, 110, 110, 110, 110, 50, 110, 30]
+  open_spreaded:
+    positions: [40, -450, 0, 0, -40, 40, 0, 0]
+  greeting:
+    positions: [0, 0, 0, 0, 0, 0, 150, 70]
+  c:
+    positions: [44, 44, 0, 0, 0, 0, 91, 11]
+  test:
+    positions: [110, 110, 110, 110, 110, 110, 110, 110]
+  test123:
+    positions: [0, 0, 55, 55, 90, 110, 0, 0]
+sequences:
+  demo:
+    loop: false
+    steps:
+    - open:3,3,3,3,3,3,3,3|2.0s
+    - close:3,3,3,3,3,3,3,3|2.0s
+    - open:3,3,3,3,3,3,3,3|2.0s
+  wave:
+    steps:
+    - close:6,6,4,4,1,1,3,3|1.0s
+    - open:1,1,1,1,1,1,3,3|1.0s
+    - ok:1,1,3,3,3,3,6,6|1.0s
+    loop: true

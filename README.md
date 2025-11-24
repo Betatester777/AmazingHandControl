@@ -40,11 +40,80 @@ python amazing_hand_gui.py
 
 Features:
 - Per-finger sliders for open/close and left/right
-- Speed selection (16)
+- Speed selection (1-6)
 - Keyboard shortcuts for quick precise movements
-- Scene loading/saving using `data/poses.csv`
+- Pose and sequence management using `data/hand_config.yaml`
+- Live servo telemetry charts (position, load, temperature, voltage)
 
-The GUI automatically creates the `data/` folder if needed and uses `data/poses.csv` for named poses.
+#### Keyboard Controls
+
+- **1-4**: Select finger (Pointer, Middle, Ring, Thumb)
+- **Arrow Keys**: Move selected finger
+  - Up/Down: Close/Open
+  - Left/Right: Move laterally
+- **Modifiers**:
+  - Normal: 1° per keypress (precise)
+  - Shift: 5° per keypress (normal)
+  - Ctrl: 10° per keypress (fast)
+- **Quick Actions**:
+  - Q: Fully close selected finger
+  - E: Fully open selected finger
+  - C: Center left/right position
+
+#### Poses and Sequences
+
+All poses and sequences are stored in `data/hand_config.yaml`:
+
+**Saving Poses:**
+1. Position fingers using sliders or keyboard
+2. Enter a name in the "Name:" field
+3. Set speed (1-6)
+4. Click "Save Pose"
+
+**Loading Poses:**
+- Select from dropdown and click "Set Pose"
+
+**Sequence Management:**
+1. Click "Execute Pose Seq" to open the sequence manager
+2. **Saved Sequences** (left panel):
+   - View all saved sequences
+   - Double-click or click "Execute" to run
+   - Click "Edit" to load into builder for modification
+   - Click "Delete" to remove
+3. **Sequence Builder** (right panel):
+   - Double-click poses from "Available Poses" to add
+   - Enter delay (seconds) and click "Add →" or "Delay"
+   - Use ↑/↓ to reorder steps
+   - Check "Loop" for continuous playback
+   - Enter sequence name and click "Save Sequence"
+   - Click "Execute" to run without saving
+
+**YAML Format Example:**
+
+```yaml
+poses:
+  open:
+    positions: [0, 0, 0, 0, 0, 0, 0, 0]
+    speed: 3
+  close:
+    positions: [110, 110, 110, 110, 110, 110, 110, 110]
+    speed: 3
+
+sequences:
+  demo:
+    loop: false
+    steps:
+      - open|2.0s
+      - close|2.0s
+      - SLEEP:1.0s
+  wave:
+    loop: true
+    steps:
+      - greeting|1.5s
+      - open|1.5s
+```
+
+The GUI automatically creates `data/hand_config.yaml` if it doesn't exist.
 
 ---
 

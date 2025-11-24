@@ -1,12 +1,88 @@
 #!/usr/bin/env python3
 """
-GUI with joystick controls for AmazingHand - control each finger individually.
+AmazingHand GUI - Interactive Control Interface for Robotic Hand
+
+OVERVIEW:
+=========
+This GUI provides comprehensive control for an 8-servo robotic hand with 4 fingers.
+Each finger has 2 servos: one for open/close movement and one for side-to-side offset.
+
+ARCHITECTURE:
+=============
+- Main Window: Left panel (finger controls) + Right panel (monitoring chart)
+- Control Sections: Connection, Global Controls, Pose Management, Sequence Player
+- Monitoring: Real-time servo telemetry with configurable metrics and visualization
+- Data Storage: YAML-based configuration (data/hand_config.yaml)
+
+KEY COMPONENTS:
+===============
+1. FingerControl class: Individual finger widget with sliders and speed control
+   - Position slider (0-110°): Open/close movement
+   - Side slider (-20 to +20°): Left/right offset  
+   - Speed control (1-6): Servo movement speed
+   - Servo IDs: Odd (position), Even (side) - e.g., Finger 1 uses servos 1 & 2
+
+2. AmazingHandGUI class: Main application window
+   - Connection Management: Auto-detect serial ports, connect/disconnect
+   - Global Controls: Open All, Close All, Center All buttons
+   - Pose Management: Save/load/apply 8-servo position sets
+   - Sequence Player: Execute multi-step animations with individual servo speeds
+   - Servo Monitor: Background thread collecting position, load, temp, voltage
+
+3. Data Format (YAML):
+   poses:
+     pose_name:
+       positions: [pos1, pos2, ..., pos8]  # Degrees for each servo
+   sequences:
+     sequence_name:
+       steps:
+         - "pose_name:speed1,speed2,...,speed8|delay"
+         - "SLEEP:duration"
+
+SERVO MAPPING:
+==============
+Servo 1: Pointer finger position (0=open, 110=closed)
+Servo 2: Pointer finger side (-20=left, 0=center, +20=right)
+Servo 3: Middle finger position
+Servo 4: Middle finger side
+Servo 5: Ring finger position  
+Servo 6: Ring finger side
+Servo 7: Thumb position
+Servo 8: Thumb side
+
+Note: Even-numbered servos (2,4,6,8) have inverted angles in code
+
+KEYBOARD CONTROLS:
+==================
+1-4: Select finger | ↑/↓: Open/Close | ←/→: Move side
+Q/E: Quick open/close | C: Center | Shift/Ctrl: Speed modifiers
+
+THREADING MODEL:
+================
+- Main thread: GUI event loop, user interaction
+- Monitor thread: Background servo telemetry (position, load, temp, voltage)
+- Sequence thread: Executes multi-step sequences without blocking UI
+
+EXTENSIBILITY:
+==============
+- Add new poses: Use "Add New" button or edit hand_config.yaml
+- Create sequences: Use sequence management dialog, format steps as "pose:speeds|delay"
+- Customize metrics: Modify setup_chart_panel() for new telemetry displays
+- Validation: validate_name() prevents YAML-breaking characters in names
+
+DEPENDENCIES:
+=============
+- rustypot: Servo controller library (Scs0009PyController)
+- tkinter/ttk: GUI framework
+- matplotlib: Real-time telemetry charts
+- PyYAML: Configuration storage
+- numpy: Angle conversions and data handling
 """
 import sys
 import os
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 from textwrap import dedent
 import numpy as np
 from rustypot import Scs0009PyController
@@ -15,11 +91,12 @@ import time
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
+import yaml
 
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
-SCENES_FILE = DATA_DIR / "poses.csv"  # CSV with named poses
+CONFIG_FILE = DATA_DIR / "hand_config.yaml"  # YAML with poses and sequences
 KEYBOARD_HELP_TEXT = dedent(
         """
         KEYBOARD CONTROLS
@@ -71,40 +148,198 @@ def clamp(value, min_value, max_value):
     return max(min_value, min(max_value, value))
 
 
-def load_scene_definitions():
-    """Load pose definitions from CSV file."""
-    if not SCENES_FILE.exists():
-        return []
-    scenes = []  # list of dicts: {name, positions[8*2], speed}
-    with SCENES_FILE.open('r') as f:
-        for line_num, line in enumerate(f, 1):
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            if line_num == 1 and 'scene' in line.lower():
-                continue
-            parts = [p.strip() for p in line.split(',')]
-            if len(parts) < 10:
-                continue
-            try:
-                scenes.append({
-                    'name': parts[0],
-                    'positions': [int(parts[i]) for i in range(1, 9)],
-                    'speed': int(parts[9])
-                })
-            except (ValueError, IndexError):
-                continue
-    return scenes
+def load_config():
+    """Load configuration from YAML file.
+    
+    Returns:
+        dict: Configuration dictionary with structure:
+            {
+                'poses': {
+                    'pose_name': {
+                        'positions': [int, int, ...] # 8 servo positions in degrees
+                    },
+                    ...
+                },
+                'sequences': {
+                    'sequence_name': {
+                        'steps': [str, str, ...] # Step format: "pose:s1,s2,...,s8|delay" or "SLEEP:duration"
+                    },
+                    ...
+                }
+            }
+    
+    Notes:
+        - Returns empty structure if file doesn't exist
+        - Gracefully handles malformed YAML
+        - Ensures both 'poses' and 'sequences' keys are present
+    """
+    if not CONFIG_FILE.exists():
+        return {'poses': {}, 'sequences': {}}
+    
+    try:
+        with CONFIG_FILE.open('r') as f:
+            config = yaml.safe_load(f) or {}
+            # Ensure both keys exist
+            if 'poses' not in config:
+                config['poses'] = {}
+            if 'sequences' not in config:
+                config['sequences'] = {}
+            return config
+    except Exception as e:
+        print(f"Error loading config: {e}")
+        return {'poses': {}, 'sequences': {}}
 
 
-def sequence_path(name: str) -> Path:
-    """Return a safe path for a saved sequence name."""
-    safe = ''.join(c for c in name if c.isalnum() or c in ('-', '_')).strip() or 'sequence'
-    return DATA_DIR / f"sequence_{safe}.txt"
+def save_config(config):
+    """Save configuration to YAML file with inline array formatting.
+    
+    Args:
+        config (dict): Configuration dictionary (see load_config for structure)
+    
+    Returns:
+        bool: True if save successful, False on error
+    
+    Implementation Details:
+        - Uses PyYAML to generate base YAML
+        - Post-processes with regex to format positions as inline arrays
+        - Example output: positions: [0, 0, 0, 0, 0, 0, 0, 0]
+        - Creates data directory if it doesn't exist
+    
+    Notes:
+        - Inline formatting improves readability for 8-element position arrays
+        - Preserves insertion order (sort_keys=False)
+        - Prints traceback on error for debugging
+    """
+    try:
+        ensure_data_dir()
+        
+        # Create YAML string with custom formatting
+        yaml_str = yaml.dump(config, default_flow_style=False, sort_keys=False)
+        
+        # Replace positions lists with flow style
+        import re
+        def replace_positions(match):
+            # Extract the positions values from the multi-line list
+            lines = match.group(0)
+            # Find all the position values
+            values = re.findall(r'- (-?\d+)', lines)
+            return f"    positions: [{', '.join(values)}]\n"
+        
+        # Pattern to match positions: followed by list items on separate lines
+        yaml_str = re.sub(r'    positions:\n(?:    - -?\d+\n)+', replace_positions, yaml_str)
+        
+        with CONFIG_FILE.open('w') as f:
+            f.write(yaml_str)
+        return True
+    except Exception as e:
+        print(f"Error saving config: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def load_pose_definitions():
+    """Load pose definitions from YAML config.
+    
+    Returns:
+        list: List of pose dictionaries with structure:
+            [{
+                'name': str,        # Pose name
+                'positions': [int]  # 8 servo positions
+            }, ...]
+    
+    Notes:
+        - Converts config dict format to list for combo box population
+        - Defaults to [0]*8 if positions missing (shouldn't happen)
+    """
+    config = load_config()
+    poses = []
+    for name, data in config.get('poses', {}).items():
+        poses.append({
+            'name': name,
+            'positions': data.get('positions', [0]*8)
+        })
+    return poses
+
+
+def validate_name(name):
+    """Validate a pose/sequence name to prevent YAML corruption.
+    
+    Args:
+        name (str): Name to validate
+    
+    Returns:
+        tuple: (is_valid: bool, error_message: str)
+            - (True, "") if valid
+            - (False, "reason") if invalid
+    
+    Validation Rules:
+        - Cannot be empty or whitespace-only
+        - Maximum 50 characters
+        - No YAML special characters: : { } [ ] , & * # ? | - < > = ! % @ ` " '
+        - No control characters (ASCII < 32)
+        - No leading/trailing spaces
+    
+    Why This Matters:
+        - YAML uses : for key-value pairs
+        - Brackets/braces for collections
+        - Commas for inline arrays
+        - Other chars can break parsing or cause ambiguity
+    
+    Example:
+        valid, msg = validate_name("my_pose")
+        if not valid:
+            print(f"Invalid name: {msg}")
+    """
+    if not name or not name.strip():
+        return False, "Name cannot be empty"
+    
+    name = name.strip()
+    
+    # Check length
+    if len(name) > 50:
+        return False, "Name too long (max 50 characters)"
+    
+    # YAML special characters that could cause issues
+    forbidden_chars = [':', '{', '}', '[', ']', ',', '&', '*', '#', '?', '|', '-', '<', '>', '=', '!', '%', '@', '`', '"', "'"]
+    
+    for char in forbidden_chars:
+        if char in name:
+            return False, f"Name contains forbidden character: {char}"
+    
+    # Check for leading/trailing spaces (already stripped, but check for internal issues)
+    if name != name.strip():
+        return False, "Name has leading/trailing spaces"
+    
+    # Check for newlines or other control characters
+    if any(ord(c) < 32 for c in name):
+        return False, "Name contains control characters"
+    
+    return True, ""
 
 
 class Tooltip:
-    """Simple tooltip displayed on widget hover."""
+    """Simple tooltip displayed on widget hover.
+    
+    Creates a small yellow tooltip window that appears after hovering
+    over a widget for a specified delay period.
+    
+    Args:
+        widget: Tkinter widget to attach tooltip to
+        text (str): Tooltip message to display
+        delay (int): Milliseconds to wait before showing tooltip (default: 500)
+    
+    Implementation:
+        - Binds to <Enter>, <Leave>, <ButtonPress> events
+        - Uses after() for delay scheduling
+        - Creates toplevel window with no decorations
+        - Positions below and to the right of widget
+    
+    Usage:
+        tooltip = Tooltip(my_button, "Click to save")
+        # Or use helper:
+        attach_tooltip(my_button, "Click to save")
+    """
 
     def __init__(self, widget, text, delay=500):
         self.widget = widget
@@ -135,7 +370,14 @@ class Tooltip:
     def show_tip(self):
         if self.tip_window or not self.text:
             return
-        x, y, _cx, cy = self.widget.bbox('insert') if self.widget.winfo_viewable() else (0, 0, 0, 0)
+        try:
+            bbox = self.widget.bbox('insert') if self.widget.winfo_viewable() else None
+            if bbox:
+                x, y, _cx, cy = bbox
+            else:
+                x, y, cy = 0, 0, 0
+        except:
+            x, y, cy = 0, 0, 0
         x += self.widget.winfo_rootx() + 20
         y += self.widget.winfo_rooty() + cy + 20
         self.tip_window = tw = tk.Toplevel(self.widget)
@@ -158,7 +400,36 @@ def attach_tooltip(widget, text):
 
 
 class FingerControl:
-    """Control widget for a single finger (2 servos)."""
+    """Control widget for a single finger (2 servos).
+    
+    Each finger consists of two servos:
+    - servo1 (odd ID): Controls close/open position (0-110°)
+    - servo2 (even ID): Controls side-to-side offset (-20 to +20°)
+    
+    Features:
+    - Vertical slider for close/open (inverted: top=closed, bottom=open)
+    - Horizontal slider for left/right movement
+    - Speed control (1-6) shared by both servos
+    - Mimic mode: When enabled, mirrors close/open changes to other mimicking fingers
+    - Mouse wheel support on sliders for fine control
+    - Center button to reset side offset to 0
+    
+    Args:
+        parent: Tkinter parent widget
+        finger_name (str): Display name (e.g., "Pointer", "Thumb")
+        servo1_id (int): Odd servo ID for position (1, 3, 5, 7)
+        servo2_id (int): Even servo ID for side (2, 4, 6, 8)
+        controller: Scs0009PyController instance
+        update_callback: Function to call when positions change
+    
+    Attributes:
+        pos_var (IntVar): Close/open position (0-110)
+        side_var (IntVar): Side offset (-20 to +20)
+        speed_var (IntVar): Servo speed (1-6)
+        mimic_var (BooleanVar): Mimic mode enabled
+    
+    Note: Even servo IDs have inverted angles in hardware.
+    """
     
     def __init__(self, parent, finger_name, servo1_id, servo2_id, controller, update_callback):
         self.servo1_id = servo1_id
@@ -223,7 +494,7 @@ class FingerControl:
         
         # Center button
         self.center_btn = ttk.Button(
-            self.frame, text="Center", 
+            self.frame, text="⊙ Center", 
             command=self.center_finger
         )
         self.center_btn.grid(row=6, column=0, columnspan=2, pady=(10,0), sticky='ew')
@@ -304,7 +575,53 @@ class FingerControl:
 
 
 class AmazingHandGUI:
-    """Main GUI application for AmazingHand control."""
+    """Main GUI application for AmazingHand control.
+    
+    The main application window provides:
+    - 4 finger controls (Pointer, Middle, Ring, Thumb) in left panel
+    - Real-time servo monitoring chart in right panel
+    - Connection management with auto-detection
+    - Global controls (Open All, Close All, Center All)
+    - Pose management (save/load/apply position sets)
+    - Sequence player (execute multi-step animations)
+    - Keyboard shortcuts for finger control
+    
+    Layout Structure:
+        Left Panel:
+            Row 0-1: Finger controls (4 fingers in 2x2 grid)
+            Row 2: Control panels stacked vertically:
+                - Connection Management
+                - Global Controls
+                - Pose Management
+                - Sequence Player
+            Row 5: Status bar
+            Row 6: Execution log (expandable)
+        
+        Right Panel:
+            - Servo monitoring chart with metric selection
+    
+    Threading:
+        - Main thread: GUI event loop
+        - Monitor thread: Background telemetry collection (monitor_servos)
+        - Sequence thread: Executes sequences without blocking UI
+    
+    Data Flow:
+        1. User adjusts slider → on_finger_update()
+        2. on_finger_update() → controller.sync_write_goal_position()
+        3. monitor_servos() → reads actual positions, updates chart
+        4. update_chart() → redraws matplotlib figure
+    
+    Args:
+        port (str, optional): Serial port path. Auto-detects if None.
+        baudrate (int): Serial baudrate (default: 1000000)
+    
+    Attributes:
+        controller (Scs0009PyController): Servo controller instance
+        connected (bool): Connection state
+        fingers (list): FingerControl instances [pointer, middle, ring, thumb]
+        servo_data (dict): Telemetry time series for charting
+        sequence_running (bool): True when sequence executing
+    """
     
     def __init__(self, port=None, baudrate=1000000):
         if port is None:
@@ -314,19 +631,11 @@ class AmazingHandGUI:
         self.root.geometry("1400x800")
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
-        # Connect to controller
-        print(f"Connecting to {port} at {baudrate} baud...")
-        self.controller = Scs0009PyController(
-            serial_port=port,
-            baudrate=baudrate,
-            timeout=0.5
-        )
-        print("Connected!")
-        
-        # Enable torque for all servos
-        for servo_id in range(1, 9):
-            self.controller.write_torque_enable(servo_id, 1)
-        print("Torque enabled for all servos")
+        # Store connection parameters
+        self.initial_port = port
+        self.initial_baudrate = baudrate
+        self.controller = None
+        self.connected = False
         
         # Data storage for charts
         self.max_data_points = 100
@@ -343,12 +652,16 @@ class AmazingHandGUI:
         
         # Sequence control flags
         self.stop_sequence = False
+        self.pause_sequence = False
         self.sequence_running = False
-        self.saved_sequence = []
+        self.sequence_thread = None
         
         # Keyboard control
         self.selected_finger_idx = 0  # Default to first finger
         
+        # Note: Tk bitmap images are unreliable across platforms here, so
+        # we stick to text-only buttons (with Unicode where appropriate).
+
         # Create main container with paned window
         paned = ttk.PanedWindow(self.root, orient='horizontal')
         paned.pack(fill='both', expand=True)
@@ -376,111 +689,214 @@ class AmazingHandGUI:
             if idx < 3:  # First row: fingers 1, 2, 3
                 row = 1
                 col = idx * 2
+                parent = left_frame
             else:  # Second row: finger 4 (thumb)
                 row = 2
                 col = 0
+                parent = left_frame
             
             finger = FingerControl(
-                left_frame, name, s1, s2, self.controller, self.on_finger_update
+                parent, name, s1, s2, self.controller, self.on_finger_update
             )
-            finger.frame.grid(row=row, column=col, columnspan=2, padx=5, pady=5)
+            finger.frame.grid(row=row, column=col, columnspan=2, padx=5, pady=5, sticky='n')
             self.fingers.append(finger)
+
+        # Right-side stacked controls next to thumb
+        right_controls_frame = ttk.Frame(left_frame)
+        right_controls_frame.grid(row=2, column=2, columnspan=4, padx=(10, 0), pady=5, sticky='n')
         
-        # Global controls
-        control_frame = ttk.LabelFrame(left_frame, text="Global Controls", padding=10)
-        control_frame.grid(row=3, column=0, columnspan=6, pady=10, sticky='ew')
+        # Connection options - top of right stack
+        conn_frame = ttk.LabelFrame(right_controls_frame, text="Connection", padding=5)
+        conn_frame.pack(fill='x', pady=(0, 5))
+        
+        conn_row = ttk.Frame(conn_frame)
+        conn_row.pack(fill='x')
+        
+        ttk.Label(conn_row, text="Port:").pack(side='left', padx=(0,2))
+        
+        # Detect available ports
+        import glob
+        import os
+        available_ports = []
+        if os.name == 'nt':  # Windows
+            available_ports = [f'COM{i}' for i in range(1, 21)]
+        else:  # Linux/Mac
+            available_ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*') + glob.glob('/dev/ttyAMA*')
+            if not available_ports:
+                available_ports = ['/dev/ttyACM0', '/dev/ttyUSB0']
+        
+        self.port_var = tk.StringVar(value=self.initial_port)
+        self.port_combo = ttk.Combobox(
+            conn_row, textvariable=self.port_var, values=available_ports, width=12, state='readonly'
+        )
+        self.port_combo.pack(side='left', padx=2)
+        attach_tooltip(self.port_combo, "Select serial port for hand controller.")
+        
+        ttk.Label(conn_row, text="Baud:").pack(side='left', padx=(5,2))
+        self.baudrate_var = tk.StringVar(value=str(self.initial_baudrate))
+        baudrate_combo = ttk.Combobox(
+            conn_row, textvariable=self.baudrate_var, 
+            values=['9600', '115200', '1000000'], width=8, state='readonly'
+        )
+        baudrate_combo.pack(side='left', padx=2)
+        attach_tooltip(baudrate_combo, "Serial communication speed.")
+        
+        self.connect_btn = ttk.Button(
+            conn_row, text="▶ Connect", command=self.connect_controller, width=10
+        )
+        self.connect_btn.pack(side='left', padx=2)
+        attach_tooltip(self.connect_btn, "Connect to the hand controller.")
+        
+        self.disconnect_btn = ttk.Button(
+            conn_row, text="⏹ Disconnect", command=self.disconnect_controller, width=10
+        )
+        self.disconnect_btn.pack(side='left', padx=2)
+        self.disconnect_btn.state(['disabled'])
+        attach_tooltip(self.disconnect_btn, "Disconnect from the controller.")
+        
+        # Global controls - second in right stack
+        control_frame = ttk.LabelFrame(right_controls_frame, text="Global Controls", padding=10)
+        control_frame.pack(fill='x', pady=5)
         
         # Preset buttons
         self.open_all_btn = ttk.Button(
-            control_frame, text="Open All", command=self.open_all
+            control_frame, text="✋ Open All", command=self.open_all
         )
         self.open_all_btn.pack(side='left', padx=5)
         attach_tooltip(self.open_all_btn, "Set every finger to fully open (0°).")
         
         self.close_all_btn = ttk.Button(
-            control_frame, text="Close All", command=self.close_all
+            control_frame, text="✊ Close All", command=self.close_all
         )
         self.close_all_btn.pack(side='left', padx=5)
         attach_tooltip(self.close_all_btn, "Set every finger to fully closed (110°).")
         
         self.center_all_btn = ttk.Button(
-            control_frame, text="Center All", command=self.center_all
+            control_frame, text="⊙ Center All", command=self.center_all
         )
         self.center_all_btn.pack(side='left', padx=5)
         attach_tooltip(self.center_all_btn, "Reset all side-to-side offsets to 0°.")
         
-        self.save_scene_btn = ttk.Button(
-            control_frame, text="Save Pose", command=self.save_scene
-        )
-        self.save_scene_btn.pack(side='left', padx=5)
-        attach_tooltip(self.save_scene_btn, "Capture current finger positions to the pose list.")
-
-        # Pose selection dropdown + Set Pose button
-        self.pose_var = tk.StringVar(value="")
+        # Pose management section - middle of right stack
+        pose_mgmt_frame = ttk.LabelFrame(right_controls_frame, text="Pose Management", padding=10)
+        pose_mgmt_frame.pack(fill='x', pady=5)
+        
+        # First row: existing poses
+        pose_row1 = ttk.Frame(pose_mgmt_frame)
+        pose_row1.pack(fill='x', pady=2)
+        
+        ttk.Label(pose_row1, text="Pose:").pack(side='left', padx=(0,2))
+        poses_list = load_pose_definitions()
+        default_pose = poses_list[0]['name'] if poses_list else ""
+        self.pose_var = tk.StringVar(value=default_pose)
         self.pose_combo = ttk.Combobox(
-            control_frame,
+            pose_row1,
             textvariable=self.pose_var,
             state='readonly',
             width=14,
-            values=[s['name'] for s in load_scene_definitions()] or ["<no poses>"]
+            values=[s['name'] for s in poses_list] or ["<no poses>"]
         )
-        self.pose_combo.pack(side='left', padx=5)
-        attach_tooltip(self.pose_combo, "Select a saved pose from data/poses.csv.")
+        self.pose_combo.pack(side='left', padx=2)
+        attach_tooltip(self.pose_combo, "Select a saved pose.")
 
-        self.load_scene_btn = ttk.Button(
-            control_frame, text="Set Pose", command=self.set_selected_pose
+        self.set_pose_btn = ttk.Button(
+            pose_row1, text="✓ Apply", command=self.set_selected_pose, width=10
         )
-        self.load_scene_btn.pack(side='left', padx=5)
-        attach_tooltip(self.load_scene_btn, "Apply the selected pose to all fingers.")
+        self.set_pose_btn.pack(side='left', padx=5)
+        attach_tooltip(self.set_pose_btn, "Apply the selected pose to all fingers.")
         
-        self.execute_scenes_btn = ttk.Button(
-            control_frame, text="Execute Pose Seq", command=self.execute_scenes
-        )
-        self.execute_scenes_btn.pack(side='left', padx=5)
-        attach_tooltip(self.execute_scenes_btn, "Build and run a sequence of poses.")
+        # Second row: add new pose
+        pose_row2 = ttk.Frame(pose_mgmt_frame)
+        pose_row2.pack(fill='x', pady=2)
         
-        self.stop_sequence_btn = ttk.Button(
-            control_frame, text="Stop Sequence", command=self.stop_sequence_exec
-        )
-        self.stop_sequence_btn.pack(side='left', padx=5)
-        self.stop_sequence_btn.state(['disabled'])
-        attach_tooltip(self.stop_sequence_btn, "Interrupt the currently running pose sequence.")
+        ttk.Label(pose_row2, text="Name:").pack(side='left', padx=(0,2))
+        self.save_pose_name_var = tk.StringVar()
+        self.save_pose_entry = ttk.Entry(pose_row2, textvariable=self.save_pose_name_var, width=14)
+        self.save_pose_entry.pack(side='left', padx=2)
+        attach_tooltip(self.save_pose_entry, "Enter a name for the pose. Avoid special chars: : { } [ ] , & * # ? | - < > = ! % @ ` \" '")
         
-        # Keyboard control indicator
-        self.kb_label = ttk.Label(
-            control_frame, 
-            text=f"KB: {self.finger_names[0]}",
-            relief='sunken',
-            padding=5
+        self.save_pose_btn = ttk.Button(
+            pose_row2, text="➕ Add New", command=self.save_pose, width=10
         )
-        self.kb_label.pack(side='left', padx=10)
-        attach_tooltip(self.kb_label, "Indicates which finger the keyboard controls target.")
+        self.save_pose_btn.pack(side='left', padx=5)
+        attach_tooltip(self.save_pose_btn, "Save current finger positions as a new pose.")
+       
+        # Sequence player section - bottom of right stack
+        seq_player_frame = ttk.LabelFrame(right_controls_frame, text="Sequence Player", padding=10)
+        seq_player_frame.pack(fill='x', pady=5)
         
-        # Help button for keyboard shortcuts
-        self.kb_help_btn = ttk.Button(
-            control_frame, text="KB Help", command=self.show_keyboard_help, width=8
+        # First row: sequence selection
+        seq_row1 = ttk.Frame(seq_player_frame)
+        seq_row1.pack(fill='x', pady=2)
+        
+        ttk.Label(seq_row1, text="Sequence:").pack(side='left', padx=(0,5))
+        
+        self.sequence_var = tk.StringVar()
+        self.sequences_combo = ttk.Combobox(
+            seq_row1,
+            textvariable=self.sequence_var,
+            state='readonly',
+            width=14
         )
-        self.kb_help_btn.pack(side='left', padx=2)
-        attach_tooltip(self.kb_help_btn, "Show all keyboard shortcuts and modifiers.")
+        self.sequences_combo.pack(side='left', padx=2)
+        attach_tooltip(self.sequences_combo, "Select a sequence to play.")
+        
+        self.manage_sequences_btn = ttk.Button(
+            seq_row1, text="🔧 Manage", command=self.manage_sequences, width=10
+        )
+        self.manage_sequences_btn.pack(side='left', padx=5)
+        attach_tooltip(self.manage_sequences_btn, "Open sequence builder and editor.")
+        
+        self.loop_sequence_var = tk.BooleanVar(value=False)
+        self.loop_check = ttk.Checkbutton(seq_row1, text="Loop", variable=self.loop_sequence_var)
+        self.loop_check.pack(side='left', padx=5)
+        attach_tooltip(self.loop_check, "When enabled, selected sequence repeats continuously until stopped.")
+        
+        # Second row: playback controls
+        seq_row2 = ttk.Frame(seq_player_frame)
+        seq_row2.pack(fill='x', pady=2)
+        
+        self.play_btn = ttk.Button(
+            seq_row2, text="▶ Play", command=self.play_selected_sequence, width=10
+        )
+        self.play_btn.pack(side='left', padx=2)
+        attach_tooltip(self.play_btn, "Start playing the selected sequence.")
+        
+        self.pause_btn = ttk.Button(
+            seq_row2, text="⏸ Pause", command=self.pause_sequence_exec, width=10
+        )
+        self.pause_btn.pack(side='left', padx=2)
+        self.pause_btn.state(['disabled'])
+        attach_tooltip(self.pause_btn, "Pause/resume the running sequence.")
+        
+        self.stop_btn = ttk.Button(
+            seq_row2, text="⏹ Stop", command=self.stop_sequence_exec, width=10
+        )
+        self.stop_btn.pack(side='left', padx=2)
+        self.stop_btn.state(['disabled'])
+        attach_tooltip(self.stop_btn, "Stop the running sequence.")
+        
+        # Refresh sequences list
+        self.refresh_sequences_list()
         
         # Bind keyboard events
         self.root.bind('<Key>', self.on_key_press)
         
-        # Status bar
+        # Status bar - below all controls
         self.status_var = tk.StringVar(value="Ready")
         status_bar = ttk.Label(
             left_frame, textvariable=self.status_var,
             relief='sunken', anchor='w'
         )
-        status_bar.grid(row=4, column=0, columnspan=6, sticky='ew', pady=(10,0))
+        status_bar.grid(row=5, column=0, columnspan=6, sticky='ew', pady=(10,0))
         attach_tooltip(status_bar, "Most recent action, warning, or error message.")
         
-        # Log output
+        # Log output - bottom, expandable
         log_frame = ttk.LabelFrame(left_frame, text="Execution Log", padding=5)
-        log_frame.grid(row=5, column=0, columnspan=6, sticky='nsew', pady=(10,0))
+        log_frame.grid(row=6, column=0, columnspan=6, sticky='nsew', pady=(10,0))
         
-        # Make row 5 expandable
-        left_frame.grid_rowconfigure(5, weight=1)
+        # Make bottom row expandable
+        left_frame.grid_rowconfigure(6, weight=1)
         
         log_scroll = ttk.Scrollbar(log_frame)
         log_scroll.pack(side='right', fill='y')
@@ -501,6 +917,12 @@ class AmazingHandGUI:
         self.monitoring = True
         self.monitor_thread = threading.Thread(target=self.monitor_servos, daemon=True)
         self.monitor_thread.start()
+        
+        # Auto-connect on startup
+        self.root.after(100, self.connect_controller)
+        
+        # Auto-connect on startup
+        self.root.after(100, self.connect_controller)
     
     def setup_chart_panel(self, parent):
         """Setup the chart display panel."""
@@ -509,12 +931,12 @@ class AmazingHandGUI:
             parent, text="Servo Monitoring",
             font=('Arial', 14, 'bold')
         )
-        chart_title.pack(pady=5)
+        chart_title.pack(pady=(5,0))
         attach_tooltip(chart_title, "Live telemetry from all servos (position, load, temperature, voltage).")
         
         # Metric selection
         select_frame = ttk.Frame(parent)
-        select_frame.pack(fill='x', padx=5, pady=5)
+        select_frame.pack(fill='x', padx=5, pady=(5,2))
         
         display_label = ttk.Label(select_frame, text="Display:")
         display_label.pack(side='left', padx=5)
@@ -547,7 +969,7 @@ class AmazingHandGUI:
         
         # Servo selection
         servo_frame = ttk.Frame(parent)
-        servo_frame.pack(fill='x', padx=5, pady=5)
+        servo_frame.pack(fill='x', padx=5, pady=2)
         
         servos_label = ttk.Label(servo_frame, text="Servos:")
         servos_label.pack(side='left', padx=5)
@@ -564,10 +986,10 @@ class AmazingHandGUI:
             attach_tooltip(servo_check, f"Show/hide servo {i+1} in the plot.")
         
         # Add select/deselect all buttons
-        all_btn = ttk.Button(servo_frame, text="All", command=self.select_all_servos, width=6)
+        all_btn = ttk.Button(servo_frame, text="✓ All", command=self.select_all_servos, width=6)
         all_btn.pack(side='left', padx=5)
         attach_tooltip(all_btn, "Enable all servo traces.")
-        none_btn = ttk.Button(servo_frame, text="None", command=self.deselect_all_servos, width=6)
+        none_btn = ttk.Button(servo_frame, text="✕ None", command=self.deselect_all_servos, width=6)
         none_btn.pack(side='left', padx=2)
         attach_tooltip(none_btn, "Hide all servo traces (useful before selecting a subset).")
         
@@ -582,17 +1004,18 @@ class AmazingHandGUI:
         attach_tooltip(rolling_check, "Limit chart to latest samples instead of growing indefinitely.")
         
         # Clear chart button
-        clear_btn = ttk.Button(servo_frame, text="Clear", command=self.clear_chart_data, width=6)
+        clear_btn = ttk.Button(servo_frame, text="⌫ Clear", command=self.clear_chart_data, width=6)
         clear_btn.pack(side='left', padx=2)
         attach_tooltip(clear_btn, "Reset collected telemetry and start fresh.")
         
         # Create matplotlib figure
         self.fig = Figure(figsize=(10, 6), dpi=100)
+        self.fig.tight_layout(pad=0.5)
         self.ax = self.fig.add_subplot(111)
         
         self.canvas = FigureCanvasTkAgg(self.fig, parent)
         canvas_widget = self.canvas.get_tk_widget()
-        canvas_widget.pack(fill='both', expand=True, padx=5, pady=5)
+        canvas_widget.pack(fill='both', expand=True, padx=2, pady=2)
         attach_tooltip(canvas_widget, "Scroll to zoom, drag to pan; updates roughly every second.")
         
         # Initialize plot
@@ -602,6 +1025,10 @@ class AmazingHandGUI:
         """Background thread to monitor servo states."""
         while self.monitoring:
             try:
+                if not self.connected or self.controller is None:
+                    time.sleep(0.1)
+                    continue
+                    
                 current_time = time.time() - self.start_time
                 
                 # Collect data for all servos first
@@ -683,6 +1110,74 @@ class AmazingHandGUI:
             except Exception as e:
                 print(f"Monitor error: {e}")
                 time.sleep(1)
+    
+    def connect_controller(self):
+        """Connect to the hand controller."""
+        if self.connected:
+            self.status_var.set("Already connected")
+            return
+        
+        port = self.port_var.get()
+        try:
+            baudrate = int(self.baudrate_var.get())
+        except ValueError:
+            self.status_var.set("Invalid baudrate")
+            return
+        
+        try:
+            self.log(f"Connecting to {port} at {baudrate} baud...")
+            self.status_var.set(f"Connecting to {port}...")
+            
+            self.controller = Scs0009PyController(
+                serial_port=port,
+                baudrate=baudrate,
+                timeout=0.5
+            )
+            
+            # Enable torque for all servos
+            for servo_id in range(1, 9):
+                self.controller.write_torque_enable(servo_id, 1)
+            
+            self.connected = True
+            self.connect_btn.state(['disabled'])
+            self.disconnect_btn.state(['!disabled'])
+            self.port_combo.config(state='disabled')
+            
+            self.log("Connected successfully!")
+            self.status_var.set(f"Connected to {port}")
+            
+        except Exception as e:
+            self.log(f"Connection failed: {e}")
+            self.status_var.set(f"Connection failed: {e}")
+            self.controller = None
+            self.connected = False
+    
+    def disconnect_controller(self):
+        """Disconnect from the hand controller."""
+        if not self.connected:
+            return
+        
+        try:
+            if self.controller:
+                # Disable torque for all servos
+                for servo_id in range(1, 9):
+                    try:
+                        self.controller.write_torque_enable(servo_id, 0)
+                    except:
+                        pass
+                self.controller = None
+            
+            self.connected = False
+            self.connect_btn.state(['!disabled'])
+            self.disconnect_btn.state(['disabled'])
+            self.port_combo.config(state='readonly')
+            
+            self.log("Disconnected")
+            self.status_var.set("Disconnected")
+            
+        except Exception as e:
+            self.log(f"Disconnect error: {e}")
+            self.status_var.set(f"Disconnect error: {e}")
     
     def update_chart(self):
         """Update the chart display."""
@@ -807,6 +1302,9 @@ class AmazingHandGUI:
     
     def on_finger_update(self, mimic_source=None):
         """Called when any finger control changes."""
+        if not self.connected or self.controller is None:
+            return
+            
         # Handle mimic functionality
         if mimic_source is not None:
             source_pos = mimic_source.pos_var.get()
@@ -888,15 +1386,64 @@ class AmazingHandGUI:
             finger.on_side_change(0)
         self.send_positions()
     
+    def refresh_sequences_list(self):
+        """Refresh the sequences dropdown with saved sequences."""
+        config = load_config()
+        sequences = config.get('sequences', {})
+        seq_names = sorted(sequences.keys())
+        self.sequences_combo['values'] = seq_names if seq_names else ['<no sequences>']
+        if seq_names:
+            self.sequence_var.set(seq_names[0])
+        else:
+            self.sequence_var.set('<no sequences>')
+    
+    def play_selected_sequence(self):
+        """Play the selected sequence from the dropdown."""
+        seq_name = self.sequence_var.get().strip()
+        if not seq_name or seq_name == '<no sequences>':
+            self.status_var.set("Select a sequence to play")
+            return
+        
+        if self.sequence_running:
+            self.status_var.set("A sequence is already running")
+            return
+        config = load_config()
+        seq_data = config.get('sequences', {}).get(seq_name, {})
+        
+        if not seq_data:
+            self.status_var.set(f"Sequence '{seq_name}' not found")
+            return
+        
+        items = seq_data.get('steps', [])
+        loop_enabled = self.loop_sequence_var.get()  # Use main window checkbox
+        poses = config.get('poses', {})
+        
+        self._execute_sequence_items(items, loop_enabled, poses)
+    
+    def pause_sequence_exec(self):
+        """Pause or resume the currently running sequence."""
+        if not self.sequence_running:
+            return
+        
+        self.pause_sequence = not self.pause_sequence
+        
+        if self.pause_sequence:
+            self.pause_btn.config(text="▶ Resume")
+            self.log("Sequence paused")
+            self.status_var.set("Sequence paused")
+        else:
+            self.pause_btn.config(text="⏸ Pause")
+            self.log("Sequence resumed")
+            self.status_var.set("Sequence resumed")
+    
     def stop_sequence_exec(self):
         """Stop the currently running sequence."""
         if not self.sequence_running:
             return
         self.stop_sequence = True
+        self.pause_sequence = False
         self.log("Stop requested")
         self.status_var.set("Stopping sequence...")
-        # Keep the button disabled until a new sequence starts
-        self.stop_sequence_btn.state(['disabled'])
     
     def show_keyboard_help(self):
         """Display keyboard shortcuts help dialog."""
@@ -1013,409 +1560,619 @@ class AmazingHandGUI:
         except Exception as e:
             self.status_var.set(f"Error reading: {e}")
     
-    def save_scene(self):
-        """Save current position as a scene."""
-        # Create dialog
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Save Scene")
-        dialog.geometry("300x150")
+    def save_pose(self):
+        """Save current position as a pose."""
+        name = self.save_pose_name_var.get().strip()
+        if not name:
+            self.status_var.set("Please enter a pose name")
+            self.save_pose_entry.focus()
+            return
         
-        ttk.Label(dialog, text="Scene Name:").pack(pady=10)
-        name_var = tk.StringVar()
-        name_entry = ttk.Entry(dialog, textvariable=name_var, width=30)
-        name_entry.pack(pady=5)
-        name_entry.focus()
+        # Validate name
+        is_valid, error_msg = validate_name(name)
+        if not is_valid:
+            self.status_var.set(f"Invalid name: {error_msg}")
+            messagebox.showerror("Invalid Name", error_msg, parent=self.root)
+            return
         
-        ttk.Label(dialog, text="Speed:").pack(pady=10)
-        speed_var = tk.IntVar(value=3)
-        speed_frame = ttk.Frame(dialog)
-        speed_frame.pack()
-        for i in range(1, 7):
-            ttk.Radiobutton(speed_frame, text=str(i), value=i, variable=speed_var).pack(side='left')
-        
-        def do_save():
-            name = name_var.get().strip()
-            if not name:
-                return
+        try:
+            # Get current positions only
+            positions = []
+            for finger in self.fingers:
+                pos1, pos2 = finger.get_positions()
+                positions.extend([pos1, pos2])
             
-            try:
-                # Get current positions
-                positions = []
-                for finger in self.fingers:
-                    pos1, pos2 = finger.get_positions()
-                    positions.extend([pos1, pos2])
+            # Load config, add pose, save
+            config = load_config()
+            config['poses'][name] = {
+                'positions': positions
+            }
+            
+            if save_config(config):
+                # Update dropdown
+                current_values = list(self.pose_combo['values'])
+                if '<no poses>' in current_values:
+                    current_values = []
+                if name not in current_values:
+                    current_values.append(name)
+                self.pose_combo['values'] = sorted(current_values)
+                self.pose_var.set(name)
                 
-                # Write to file
-                ensure_data_dir()
-                with SCENES_FILE.open('a') as f:
-                    pos_str = ", ".join(f"{p:4d}" for p in positions)
-                    f.write(f"{name}, {pos_str}, {speed_var.get():5d}\n")
+                # Clear entry for next use
+                self.save_pose_name_var.set('')
                 
                 self.status_var.set(f"Saved pose '{name}'")
-                dialog.destroy()
-            
-            except Exception as e:
-                self.status_var.set(f"Error saving: {e}")
+                self.log(f"Saved pose: {name}")
+            else:
+                self.status_var.set("Error saving pose")
         
-        ttk.Button(dialog, text="Save", command=do_save).pack(pady=10)
-
-    def load_scene(self):
-        """Deprecated: kept for compatibility, now routed through set_selected_pose."""
-        # For backward compatibility if called somewhere else, just call new logic
-        self.set_selected_pose()
+        except Exception as e:
+            self.status_var.set(f"Error saving: {e}")
 
     def set_selected_pose(self):
         """Apply the currently selected pose from the dropdown to the hand."""
         try:
-            # Read available poses
-            if not SCENES_FILE.exists():
-                self.status_var.set("No poses file found")
-                return
-
-            scenes = load_scene_definitions()
-            if not scenes:
-                self.status_var.set("No poses found in file")
+            # Load config
+            config = load_config()
+            poses = config.get('poses', {})
+            
+            if not poses:
+                self.status_var.set("No poses found")
                 return
             
-            # If there is a pose selected in the dropdown, use it; otherwise pick first
+            # Get selected pose
             selected_name = self.pose_var.get().strip() if hasattr(self, 'pose_var') else ''
-            scene = None
-            if selected_name:
-                for s in scenes:
-                    if s['name'] == selected_name:
-                        scene = s
-                        break
-            if scene is None:
-                scene = scenes[0]
+            if not selected_name or selected_name not in poses:
+                selected_name = list(poses.keys())[0] if poses else None
+            
+            if not selected_name:
+                self.status_var.set("No pose selected")
+                return
+            
+            pose_data = poses[selected_name]
+            positions = pose_data.get('positions', [0]*8)
 
-            # Apply positions to fingers
+            # Apply positions to fingers (keep current speeds)
             for idx, finger in enumerate(self.fingers):
-                pos1 = scene['positions'][idx * 2]
-                pos2 = scene['positions'][idx * 2 + 1]
+                pos1 = positions[idx * 2]
+                pos2 = positions[idx * 2 + 1]
                 finger.set_positions(pos1, pos2)
-                finger.speed_var.set(scene['speed'])
 
             # Trigger position update
             self.update_pending = True
             self.send_positions()
 
-            self.status_var.set(f"Set pose '{scene['name']}'")
+            self.status_var.set(f"Set pose '{selected_name}'")
         
         except Exception as e:
             self.status_var.set(f"Error setting pose: {e}")
     
-    def execute_scenes(self):
-        """Execute a sequence of poses."""
+    def manage_sequences(self):
+        """Open sequence management dialog with list of saved sequences."""
         try:
-            # Read available scenes
-            if not SCENES_FILE.exists():
-                self.status_var.set("No scenes file found")
-                return
-
-            scenes_list = load_scene_definitions()
-            if not scenes_list:
-                self.status_var.set("No scenes found in file")
-                return
-
-            scenes = {scene['name']: scene for scene in scenes_list}
+            # Load config
+            config = load_config()
+            poses = config.get('poses', {})
+            sequences = config.get('sequences', {})
             
-            # Create execution dialog
+            if not poses:
+                self.status_var.set("No poses found - create poses first")
+                return
+            
+            # Create management dialog
             dialog = tk.Toplevel(self.root)
-            dialog.title("Execute Pose Sequence")
-            dialog.geometry("700x600")
+            dialog.title("Sequence Management")
+            dialog.geometry("900x700")
             
-            # Main container
             main_container = ttk.Frame(dialog, padding=10)
             main_container.pack(fill='both', expand=True)
             
-            ttk.Label(main_container, text="Build Pose Sequence:", font=('Arial', 12, 'bold')).pack(pady=(0,10))
+            # Two-panel layout
+            paned = ttk.PanedWindow(main_container, orient='horizontal')
+            paned.pack(fill='both', expand=True)
             
-            # Two-column layout
-            columns = ttk.Frame(main_container)
-            columns.pack(fill='both', expand=True)
+            # Left panel - Saved sequences list
+            left_panel = ttk.Frame(paned)
+            paned.add(left_panel, weight=1)
             
-            # Two-column layout
-            columns = ttk.Frame(main_container)
-            columns.pack(fill='both', expand=True)
+            ttk.Label(left_panel, text="Saved Sequences", font=('Arial', 12, 'bold')).pack(pady=(0,10))
+            
+            # Sequences listbox with scrollbar
+            seq_frame = ttk.Frame(left_panel)
+            seq_frame.pack(fill='both', expand=True)
+            
+            seq_scroll = ttk.Scrollbar(seq_frame)
+            seq_scroll.pack(side='right', fill='y')
+            
+            sequences_listbox = tk.Listbox(seq_frame, yscrollcommand=seq_scroll.set)
+            sequences_listbox.pack(side='left', fill='both', expand=True)
+            seq_scroll.config(command=sequences_listbox.yview)
+            attach_tooltip(sequences_listbox, "List of all saved sequences. Double-click to execute.")
+            
+            def refresh_sequences_list():
+                sequences_listbox.delete(0, tk.END)
+                config = load_config()
+                for seq_name in sorted(config.get('sequences', {}).keys()):
+                    sequences_listbox.insert(tk.END, seq_name)
+            
+            refresh_sequences_list()
+            
+            # Sequence action buttons
+            seq_btn_frame = ttk.Frame(left_panel)
+            seq_btn_frame.pack(fill='x', pady=(10,0))
+            
+            def execute_selected_sequence():
+                selection = sequences_listbox.curselection()
+                if not selection:
+                    self.status_var.set("Select a sequence to execute")
+                    return
+                
+                seq_name = sequences_listbox.get(selection[0])
+                config = load_config()
+                seq_data = config.get('sequences', {}).get(seq_name, {})
+                
+                if not seq_data:
+                    self.status_var.set(f"Sequence '{seq_name}' not found")
+                    return
+                
+                items = seq_data.get('steps', [])
+                loop_enabled = False  # Always non-looping in dialog quick-execute
+                
+                dialog.destroy()
+                self._execute_sequence_items(items, loop_enabled, poses)
+            
+            def delete_selected_sequence():
+                selection = sequences_listbox.curselection()
+                if not selection:
+                    return
+                
+                seq_name = sequences_listbox.get(selection[0])
+                if tk.messagebox.askyesno("Delete Sequence", f"Delete sequence '{seq_name}'?", parent=dialog):
+                    config = load_config()
+                    if seq_name in config.get('sequences', {}):
+                        del config['sequences'][seq_name]
+                        save_config(config)
+                        refresh_sequences_list()
+                        self.refresh_sequences_list()  # Update main window
+                        self.status_var.set(f"Deleted sequence '{seq_name}'")
+                        self.log(f"Deleted sequence: {seq_name}")
+            
+            def edit_selected_sequence():
+                selection = sequences_listbox.curselection()
+                if not selection:
+                    return
+                
+                seq_name = sequences_listbox.get(selection[0])
+                config = load_config()
+                seq_data = config.get('sequences', {}).get(seq_name, {})
+                
+                if seq_data:
+                    # Load sequence steps into builder
+                    steps = seq_data.get('steps', [])
+                    builder_listbox.delete(0, tk.END)
+                    for step in steps:
+                        # Convert old format (without speeds) to new format if needed
+                        if ':' not in step and '|' in step:
+                            # Old format: pose_name|delay
+                            parts = step.split('|')
+                            pose_name = parts[0]
+                            # Use default speeds 3,3,3,3,3,3,3,3
+                            speeds_str = '3,3,3,3,3,3,3,3'
+                            if len(parts) > 1:
+                                builder_listbox.insert(tk.END, f"{pose_name}:{speeds_str}|{parts[1]}")
+                            else:
+                                builder_listbox.insert(tk.END, f"{pose_name}:{speeds_str}")
+                        elif ':' not in step and not step.startswith('SLEEP:'):
+                            # Old format: just pose_name
+                            speeds_str = '3,3,3,3,3,3,3,3'
+                            builder_listbox.insert(tk.END, f"{step}:{speeds_str}")
+                        else:
+                            # New format or SLEEP command
+                            builder_listbox.insert(tk.END, step)
+                    save_name_var.set(seq_name)
+                    current_seq_label.config(text=f"(Editing: {seq_name})")
+                    self.status_var.set(f"Loaded '{seq_name}' for editing")
+            
+            exec_btn = ttk.Button(seq_btn_frame, text="▶ Execute", command=execute_selected_sequence, width=12)
+            exec_btn.pack(side='left', padx=2)
+            attach_tooltip(exec_btn, "Run the selected sequence immediately.")
+            
+            edit_btn = ttk.Button(seq_btn_frame, text="✎ Edit", command=edit_selected_sequence, width=12)
+            edit_btn.pack(side='left', padx=2)
+            attach_tooltip(edit_btn, "Load the selected sequence into the builder for editing.")
+            
+            delete_btn = ttk.Button(seq_btn_frame, text="🗑 Delete", command=delete_selected_sequence, width=12)
+            delete_btn.pack(side='left', padx=2)
+            attach_tooltip(delete_btn, "Permanently delete the selected sequence.")
+            
+            # Double-click to execute
+            sequences_listbox.bind('<Double-Button-1>', lambda e: execute_selected_sequence())
+            
+            # Right panel - Sequence builder
+            right_panel = ttk.Frame(paned)
+            paned.add(right_panel, weight=2)
+            
+            # Builder title with current sequence name
+            builder_title_frame = ttk.Frame(right_panel)
+            builder_title_frame.pack(fill='x', pady=(0,10))
+            
+            ttk.Label(builder_title_frame, text="Sequence Builder", font=('Arial', 12, 'bold')).pack(side='left')
+            
+            current_seq_label = ttk.Label(builder_title_frame, text="", font=('Arial', 10, 'italic'), foreground='#666')
+            current_seq_label.pack(side='left', padx=10)
+            
+            # Builder layout
+            builder_container = ttk.Frame(right_panel)
+            builder_container.pack(fill='both', expand=True)
+            
+            # Available poses and current sequence
+            cols = ttk.Frame(builder_container)
+            cols.pack(fill='both', expand=True)
             
             # Available poses
-            left_frame = ttk.LabelFrame(columns, text="Available Poses", padding=10)
-            left_frame.pack(side='left', fill='both', expand=True, padx=(0,5))
+            poses_frame = ttk.LabelFrame(cols, text="Available Poses", padding=10)
+            poses_frame.pack(side='left', fill='both', expand=True, padx=(0,5))
             
-            scenes_list = tk.Listbox(left_frame, height=20)
-            scenes_list.pack(fill='both', expand=True, pady=5)
-            for name in sorted(scenes.keys()):
-                scenes_list.insert(tk.END, name)
+            poses_listbox = tk.Listbox(poses_frame, height=15)
+            poses_listbox.pack(fill='both', expand=True)
+            attach_tooltip(poses_listbox, "Available poses. Double-click to add to sequence.")
+            for pose_name in sorted(poses.keys()):
+                poses_listbox.insert(tk.END, pose_name)
             
-            # Sequence list
-            right_frame = ttk.LabelFrame(columns, text="Pose Sequence (in order)", padding=10)
-            right_frame.pack(side='left', fill='both', expand=True, padx=(5,0))
+            # Sequence being built
+            builder_frame = ttk.LabelFrame(cols, text="Sequence Steps", padding=10)
+            builder_frame.pack(side='left', fill='both', expand=True, padx=(5,0))
             
-            sequence_list = tk.Listbox(right_frame, height=20)
-            sequence_list.pack(fill='both', expand=True, pady=5)
+            builder_listbox = tk.Listbox(builder_frame, height=15)
+            builder_listbox.pack(fill='both', expand=True)
+            attach_tooltip(builder_listbox, "Sequence steps in order. Select a step to remove or reorder.")
             
-            # Restore saved sequence
-            for item in self.saved_sequence:
-                sequence_list.insert(tk.END, item)
+            # Control buttons
+            control_frame = ttk.Frame(builder_container)
+            control_frame.pack(fill='x', pady=(10,0))
             
-            # Controls section
-            controls_frame = ttk.Frame(main_container)
-            controls_frame.pack(fill='x', pady=(10,0))
-            
-            # Delay entry
-            delay_frame = ttk.Frame(controls_frame)
-            delay_frame.pack(side='left', padx=5)
-            ttk.Label(delay_frame, text="Delay (sec):").pack(side='left', padx=(0,5))
+            ttk.Label(control_frame, text="Delay (sec):").pack(side='left', padx=(0,5))
             delay_var = tk.StringVar(value="1.0")
-            ttk.Entry(delay_frame, textvariable=delay_var, width=8).pack(side='left')
+            delay_entry = ttk.Entry(control_frame, textvariable=delay_var, width=8)
+            delay_entry.pack(side='left', padx=5)
+            attach_tooltip(delay_entry, "Pause duration in seconds between poses or as standalone delay.")
             
-            # Loop checkbox
-            loop_var = tk.BooleanVar(value=False)
-            ttk.Checkbutton(controls_frame, text="Loop", variable=loop_var).pack(side='left', padx=10)
+            # Speed settings frame
+            speed_frame = ttk.LabelFrame(builder_container, text="Individual Finger Speeds", padding=3)
+            speed_frame.pack(fill='x', pady=(10,0))
             
-            def add_to_sequence():
-                selection = scenes_list.curselection()
+            finger_labels = ['Pointer', 'Middle', 'Ring', 'Thumb']
+            speed_vars = []
+            
+            for idx, label in enumerate(finger_labels):
+                row_frame = ttk.Frame(speed_frame)
+                row_frame.pack(side='left', padx=5)
+                
+                ttk.Label(row_frame, text=f"{label}:").pack(side='left', padx=(0,2))
+                speed_var = tk.IntVar(value=3)
+                speed_vars.append(speed_var)
+                ttk.Spinbox(row_frame, from_=1, to=6, textvariable=speed_var, width=4).pack(side='left')
+            
+            # Button to copy current UI speeds
+            def copy_ui_speeds():
+                for idx, finger in enumerate(self.fingers):
+                    speed_vars[idx].set(finger.get_speed())
+                self.status_var.set("Copied speeds from UI")
+            
+            copy_speeds_btn = ttk.Button(speed_frame, text="⬇ Copy from UI", command=copy_ui_speeds)
+            copy_speeds_btn.pack(side='left', padx=5)
+            attach_tooltip(copy_speeds_btn, "Import current speed settings from main window finger controls.")
+            
+            def add_to_builder():
+                selection = poses_listbox.curselection()
                 if selection:
-                    scene_name = scenes_list.get(selection[0])
+                    pose_name = poses_listbox.get(selection[0])
+                    # Use speeds from the speed settings
+                    speeds = []
+                    for speed_var in speed_vars:
+                        speed = speed_var.get()
+                        speeds.extend([speed, speed])  # Same speed for both servos in finger
+                    speeds_str = ','.join(map(str, speeds))
+                    
                     delay = delay_var.get()
                     if delay and float(delay) > 0:
-                        sequence_list.insert(tk.END, f"{scene_name}|{delay}s")
+                        builder_listbox.insert(tk.END, f"{pose_name}:{speeds_str}|{delay}s")
                     else:
-                        sequence_list.insert(tk.END, scene_name)
+                        builder_listbox.insert(tk.END, f"{pose_name}:{speeds_str}")
             
-            # Bind double-click to add scene
-            scenes_list.bind('<Double-Button-1>', lambda e: add_to_sequence())
+            poses_listbox.bind('<Double-Button-1>', lambda e: add_to_builder())
             
             def add_delay():
                 delay = delay_var.get()
                 if delay and float(delay) > 0:
-                    sequence_list.insert(tk.END, f"SLEEP:{delay}s")
+                    builder_listbox.insert(tk.END, f"SLEEP:{delay}s")
             
-            def remove_from_sequence():
-                selection = sequence_list.curselection()
+            def remove_step():
+                selection = builder_listbox.curselection()
                 if selection:
-                    sequence_list.delete(selection[0])
+                    builder_listbox.delete(selection[0])
             
-            def clear_sequence():
-                sequence_list.delete(0, tk.END)
-                self.saved_sequence = []
+            def clear_builder():
+                builder_listbox.delete(0, tk.END)
+                save_name_var.set('')
+                current_seq_label.config(text='')
             
             def move_up():
-                selection = sequence_list.curselection()
+                selection = builder_listbox.curselection()
                 if selection and selection[0] > 0:
                     idx = selection[0]
-                    item = sequence_list.get(idx)
-                    sequence_list.delete(idx)
-                    sequence_list.insert(idx - 1, item)
-                    sequence_list.selection_set(idx - 1)
+                    item = builder_listbox.get(idx)
+                    builder_listbox.delete(idx)
+                    builder_listbox.insert(idx - 1, item)
+                    builder_listbox.selection_set(idx - 1)
             
             def move_down():
-                selection = sequence_list.curselection()
-                if selection and selection[0] < sequence_list.size() - 1:
+                selection = builder_listbox.curselection()
+                if selection and selection[0] < builder_listbox.size() - 1:
                     idx = selection[0]
-                    item = sequence_list.get(idx)
-                    sequence_list.delete(idx)
-                    sequence_list.insert(idx + 1, item)
-                    sequence_list.selection_set(idx + 1)
+                    item = builder_listbox.get(idx)
+                    builder_listbox.delete(idx)
+                    builder_listbox.insert(idx + 1, item)
+                    builder_listbox.selection_set(idx + 1)
             
-            # Buttons
-            btn_frame = ttk.Frame(controls_frame)
+            btn_frame = ttk.Frame(control_frame)
             btn_frame.pack(side='left', padx=10)
             
-            ttk.Button(btn_frame, text="Add Scene →", command=add_to_sequence, width=12).pack(side='left', padx=2)
-            ttk.Button(btn_frame, text="Add Delay", command=add_delay, width=10).pack(side='left', padx=2)
-            ttk.Button(btn_frame, text="Remove", command=remove_from_sequence, width=8).pack(side='left', padx=2)
-            ttk.Button(btn_frame, text="Clear All", command=clear_sequence, width=8).pack(side='left', padx=2)
-            ttk.Button(btn_frame, text="↑", command=move_up, width=3).pack(side='left', padx=2)
-            ttk.Button(btn_frame, text="↓", command=move_down, width=3).pack(side='left', padx=2)
+            add_btn = ttk.Button(btn_frame, text="➕ Add", command=add_to_builder, width=8)
+            add_btn.pack(side='left', padx=2)
+            attach_tooltip(add_btn, "Add selected pose with current speeds and delay to sequence.")
             
-            def execute_sequence():
-                if sequence_list.size() == 0:
+            delay_btn = ttk.Button(btn_frame, text="⏱ Delay", command=add_delay, width=8)
+            delay_btn.pack(side='left', padx=2)
+            attach_tooltip(delay_btn, "Insert a standalone pause (SLEEP) into the sequence.")
+            
+            remove_btn = ttk.Button(btn_frame, text="➖ Remove", command=remove_step, width=8)
+            remove_btn.pack(side='left', padx=2)
+            attach_tooltip(remove_btn, "Delete the selected step from the sequence.")
+            
+            clear_btn = ttk.Button(btn_frame, text="🗑 Clear", command=clear_builder, width=8)
+            clear_btn.pack(side='left', padx=2)
+            attach_tooltip(clear_btn, "Remove all steps and reset the builder.")
+            
+            up_btn = ttk.Button(btn_frame, text="↑", command=move_up, width=3)
+            up_btn.pack(side='left', padx=2)
+            attach_tooltip(up_btn, "Move selected step up in sequence order.")
+            
+            down_btn = ttk.Button(btn_frame, text="↓", command=move_down, width=3)
+            down_btn.pack(side='left', padx=2)
+            attach_tooltip(down_btn, "Move selected step down in sequence order.")
+            
+            # Save sequence section
+            save_frame = ttk.Frame(builder_container)
+            save_frame.pack(fill='x', pady=(15,0))
+            
+            ttk.Label(save_frame, text="Sequence Name:").pack(side='left', padx=(0,5))
+            save_name_var = tk.StringVar()
+            
+            def on_name_change(*args):
+                name = save_name_var.get().strip()
+                if name:
+                    current_seq_label.config(text=f"(Current: {name})")
+                else:
+                    current_seq_label.config(text="")
+            
+            save_name_var.trace('w', on_name_change)
+            
+            name_entry = ttk.Entry(save_frame, textvariable=save_name_var, width=20)
+            name_entry.pack(side='left', padx=5)
+            attach_tooltip(name_entry, "Enter a unique name. Avoid special chars: : { } [ ] , & * # ? | - < > = ! % @ ` \" '")
+            
+            def save_sequence():
+                name = save_name_var.get().strip()
+                if not name:
+                    self.status_var.set("Enter a sequence name")
                     return
                 
-                # Capture and save sequence before destroying dialog
-                sequence_items = [sequence_list.get(i) for i in range(sequence_list.size())]
-                self.saved_sequence = sequence_items  # Save for next time
-                loop_enabled = loop_var.get()
+                # Validate name
+                is_valid, error_msg = validate_name(name)
+                if not is_valid:
+                    self.status_var.set(f"Invalid name: {error_msg}")
+                    tk.messagebox.showerror("Invalid Name", error_msg, parent=dialog)
+                    return
+                
+                if builder_listbox.size() == 0:
+                    self.status_var.set("Sequence is empty")
+                    return
+                
+                steps = [builder_listbox.get(i) for i in range(builder_listbox.size())]
+                
+                config = load_config()
+                config['sequences'][name] = {
+                    'steps': steps
+                }
+                
+                if save_config(config):
+                    refresh_sequences_list()
+                    self.refresh_sequences_list()  # Update main window
+                    self.status_var.set(f"Saved sequence '{name}'")
+                    self.log(f"Saved sequence: {name}")
+                    # Don't clear the name, keep it for further edits
+                    current_seq_label.config(text=f"(Saved: {name})")
+                else:
+                    self.status_var.set("Error saving sequence")
+            
+            def execute_builder():
+                if builder_listbox.size() == 0:
+                    return
+                
+                steps = [builder_listbox.get(i) for i in range(builder_listbox.size())]
+                loop_enabled = False  # Test execution is non-looping
                 
                 dialog.destroy()
-                
-                # Create stop flag and mark sequence as running
-                self.stop_sequence = False
-                self.sequence_running = True
-                self.root.after(0, lambda: self.stop_sequence_btn.state(['!disabled']))
-                
-                # Execute sequence in background thread
-                def run_sequence():
-                    loop_count = 0
-                    
-                    while True:
-                        loop_count += 1
-                        if loop_enabled:
-                            self.root.after(0, lambda c=loop_count: self.log(f"=== Loop iteration {c} ==="))
-                        else:
-                            self.root.after(0, lambda: self.log("=== Starting sequence execution ==="))
-                        
-                        for item in sequence_items:
-                            # Check stop flag
-                            if self.stop_sequence:
-                                self.root.after(0, lambda: self.log("=== Sequence stopped ==="))
-                                self.root.after(0, lambda: self.status_var.set("Sequence stopped"))
-                                self.sequence_running = False
-                                self.root.after(0, lambda: self.stop_sequence_btn.state(['disabled']))
-                                return
-                            
-                            if item.startswith("SLEEP:"):
-                                # Sleep delay
-                                delay = float(item.split(':')[1].rstrip('s'))
-                                self.root.after(0, lambda d=delay: self.status_var.set(f"Waiting {d}s..."))
-                                self.root.after(0, lambda d=delay: self.log(f"Delay: {d}s"))
-                                time.sleep(delay)
-                            else:
-                                # Scene execution
-                                parts = item.split('|')
-                                scene_name = parts[0]
-                                
-                                if scene_name not in scenes:
-                                    print(f"Scene '{scene_name}' not found, skipping")
-                                    continue
-                                
-                                scene = scenes[scene_name]
-                                
-                                # Apply to GUI and wait for it to complete
-                                self.root.after(0, lambda s=scene, n=scene_name: self._apply_scene(s, n))
-                                
-                                # Wait for movement to complete
-                                if len(parts) > 1:
-                                    delay = float(parts[1].rstrip('s'))
-                                    self.root.after(0, lambda d=delay: self.log(f"  → Wait: {d}s"))
-                                    time.sleep(delay)
-                                else:
-                                    # Calculate timeout based on speed
-                                    speed = scene['speed']
-                                    timeout = 15.0 - (speed - 1) * 2.4
-                                    self.root.after(0, lambda t=timeout: self.log(f"  → Auto-wait: {t:.1f}s"))
-                                    time.sleep(timeout)
-                        
-                        # Check if we should loop
-                        if not loop_enabled:
-                            break
-                        
-                        # Small delay between loop iterations
-                        if loop_enabled and not self.stop_sequence:
-                            time.sleep(0.5)
-                    
-                    self.sequence_running = False
-                    self.root.after(0, lambda: self.stop_sequence_btn.state(['disabled']))
-                    self.root.after(0, lambda: self.status_var.set("Sequence complete"))
-                    self.root.after(0, lambda: self.log("=== Sequence complete ==="))
-                
-                threading.Thread(target=run_sequence, daemon=True).start()
+                self._execute_sequence_items(steps, loop_enabled, poses)
             
-            def save_sequence_to_file():
-                """Save current sequence to a file."""
-                if sequence_list.size() == 0:
-                    self.status_var.set("No sequence to save")
-                    return
-                
-                # Create save dialog
-                save_dialog = tk.Toplevel(dialog)
-                save_dialog.title("Save Sequence")
-                save_dialog.geometry("400x150")
-                
-                ttk.Label(save_dialog, text="Sequence Name:").pack(pady=10)
-                name_var = tk.StringVar()
-                name_entry = ttk.Entry(save_dialog, textvariable=name_var, width=30)
-                name_entry.pack(pady=5)
-                name_entry.focus()
-                
-                def do_save():
-                    name = name_var.get().strip()
-                    if not name:
-                        return
-                    
-                    try:
-                        sequence = [sequence_list.get(i) for i in range(sequence_list.size())]
-                        ensure_data_dir()
-                        filepath = sequence_path(name)
-
-                        with filepath.open('w') as f:
-                            for item in sequence:
-                                f.write(f"{item}\n")
-
-                        self.status_var.set(f"Saved sequence to {filepath.name}")
-                        self.log(f"Saved sequence: {filepath}")
-                        save_dialog.destroy()
-                    except Exception as e:
-                        self.status_var.set(f"Error saving: {e}")
-                
-                ttk.Button(save_dialog, text="Save", command=do_save).pack(pady=10)
+            save_btn = ttk.Button(save_frame, text="💾 Save Sequence", command=save_sequence, width=15)
+            save_btn.pack(side='left', padx=5)
+            attach_tooltip(save_btn, "Save the current sequence with the specified name.")
             
-            def load_sequence_from_file():
-                """Load sequence from a file."""
-                from tkinter import filedialog
-
-                ensure_data_dir()
-                filename = filedialog.askopenfilename(
-                    title="Load Sequence",
-                    initialdir=str(DATA_DIR),
-                    filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
-                )
-                
-                if not filename:
-                    return
-                
-                try:
-                    sequence_list.delete(0, tk.END)
-                    
-                    with open(filename, 'r') as f:
-                        for line in f:
-                            line = line.strip()
-                            if line:
-                                sequence_list.insert(tk.END, line)
-                    
-                    # Update saved sequence so it persists
-                    self.saved_sequence = [sequence_list.get(i) for i in range(sequence_list.size())]
-                    
-                    loaded_name = os.path.basename(filename)
-                    self.status_var.set(f"Loaded sequence from {loaded_name}")
-                    self.log(f"Loaded sequence: {loaded_name}")
-                except Exception as e:
-                    self.status_var.set(f"Error loading: {e}")
-                    import traceback
-                    traceback.print_exc()
+            exec_builder_btn = ttk.Button(save_frame, text="▶ Execute", command=execute_builder, width=12)
+            exec_builder_btn.pack(side='left', padx=5)
+            attach_tooltip(exec_builder_btn, "Test-run the sequence being built without saving.")
             
-            # Execute/Cancel buttons at bottom
-            exec_frame = ttk.Frame(main_container)
-            exec_frame.pack(pady=(15,0))
-            ttk.Button(exec_frame, text="Save Sequence", command=save_sequence_to_file, width=15).pack(side='left', padx=5)
-            ttk.Button(exec_frame, text="Load Sequence", command=load_sequence_from_file, width=15).pack(side='left', padx=5)
-            ttk.Button(exec_frame, text="Execute Sequence", command=execute_sequence, width=18).pack(side='left', padx=5)
-            ttk.Button(exec_frame, text="Cancel", command=dialog.destroy, width=10).pack(side='left', padx=5)
+            # Close button
+            close_btn = ttk.Button(main_container, text="Close", command=dialog.destroy, width=12)
+            close_btn.pack(pady=(10,0))
+            attach_tooltip(close_btn, "Close the sequence manager and return to main window.")
         
         except Exception as e:
             self.status_var.set(f"Error: {e}")
             import traceback
             traceback.print_exc()
     
-    def _apply_scene(self, scene, name):
-        """Apply a scene to the GUI (called from main thread)."""
+    def _execute_sequence_items(self, items, loop_enabled, poses):
+        """Execute a sequence of pose steps."""
+        self.stop_sequence = False
+        self.pause_sequence = False
+        self.sequence_running = True
+        self.root.after(0, lambda: self.play_btn.state(['disabled']))
+        self.root.after(0, lambda: self.pause_btn.state(['!disabled']))
+        self.root.after(0, lambda: self.stop_btn.state(['!disabled']))
+        
+        def run_sequence():
+            loop_count = 0
+            
+            while True:
+                loop_count += 1
+                if loop_enabled:
+                    self.root.after(0, lambda c=loop_count: self.log(f"=== Loop iteration {c} ==="))
+                else:
+                    self.root.after(0, lambda: self.log("=== Starting sequence execution ==="))
+                
+                for item in items:
+                    # Handle pause
+                    while self.pause_sequence and not self.stop_sequence:
+                        time.sleep(0.1)
+                    
+                    if self.stop_sequence:
+                        self.root.after(0, lambda: self.log("=== Sequence stopped ==="))
+                        self.root.after(0, lambda: self.status_var.set("Sequence stopped"))
+                        self.sequence_running = False
+                        self.root.after(0, lambda: self.play_btn.state(['!disabled']))
+                        self.root.after(0, lambda: self.pause_btn.state(['disabled']))
+                        self.root.after(0, lambda: self.pause_btn.config(text="⏸ Pause"))
+                        self.root.after(0, lambda: self.stop_btn.state(['disabled']))
+                        return
+                    
+                    if item.startswith("SLEEP:"):
+                        delay = float(item.split(':')[1].rstrip('s'))
+                        self.root.after(0, lambda d=delay: self.status_var.set(f"Waiting {d}s..."))
+                        self.root.after(0, lambda d=delay: self.log(f"Delay: {d}s"))
+                        # Sleep in small increments to allow pause detection
+                        elapsed = 0
+                        while elapsed < delay:
+                            while self.pause_sequence and not self.stop_sequence:
+                                time.sleep(0.1)
+                            if self.stop_sequence:
+                                break
+                            time.sleep(0.1)
+                            elapsed += 0.1
+                    else:
+                        # Parse pose with speeds: pose_name:s1,s2,...,s8|delay or pose_name:s1,s2,...,s8
+                        parts = item.split('|')
+                        pose_part = parts[0]
+                        
+                        # Split pose name and speeds
+                        if ':' in pose_part:
+                            pose_name, speeds_str = pose_part.split(':', 1)
+                            speeds = [int(s) for s in speeds_str.split(',')]
+                        else:
+                            # Old format without speeds - use default
+                            pose_name = pose_part
+                            speeds = [3] * 8
+                        
+                        if pose_name not in poses:
+                            print(f"Pose '{pose_name}' not found, skipping")
+                            continue
+                        
+                        pose_data = poses[pose_name]
+                        self.root.after(0, lambda pd=pose_data, n=pose_name, sp=speeds: self._apply_pose_from_config(pd, n, sp))
+                        
+                        if len(parts) > 1:
+                            delay = float(parts[1].rstrip('s'))
+                            self.root.after(0, lambda d=delay: self.log(f"  → Wait: {d}s"))
+                            # Sleep in small increments to allow pause detection
+                            elapsed = 0
+                            while elapsed < delay:
+                                while self.pause_sequence and not self.stop_sequence:
+                                    time.sleep(0.1)
+                                if self.stop_sequence:
+                                    break
+                                time.sleep(0.1)
+                                elapsed += 0.1
+                        else:
+                            # Use average speed for auto-wait calculation
+                            avg_speed = sum(speeds) / len(speeds)
+                            timeout = 15.0 - (avg_speed - 1) * 2.4
+                            self.root.after(0, lambda t=timeout: self.log(f"  → Auto-wait: {t:.1f}s"))
+                            # Sleep in small increments to allow pause detection
+                            elapsed = 0
+                            while elapsed < timeout:
+                                while self.pause_sequence and not self.stop_sequence:
+                                    time.sleep(0.1)
+                                if self.stop_sequence:
+                                    break
+                                time.sleep(0.1)
+                                elapsed += 0.1
+                
+                if not loop_enabled:
+                    break
+                
+                if loop_enabled and not self.stop_sequence:
+                    time.sleep(0.5)
+            
+            self.sequence_running = False
+            self.root.after(0, lambda: self.play_btn.state(['!disabled']))
+            self.root.after(0, lambda: self.pause_btn.state(['disabled']))
+            self.root.after(0, lambda: self.pause_btn.config(text="⏸ Pause"))
+            self.root.after(0, lambda: self.stop_btn.state(['disabled']))
+            self.root.after(0, lambda: self.status_var.set("Sequence complete"))
+            self.root.after(0, lambda: self.log("=== Sequence complete ==="))
+        
+        self.sequence_thread = threading.Thread(target=run_sequence, daemon=True)
+        self.sequence_thread.start()
+    
+    def _apply_pose(self, pose, name):
+        """Apply a pose to the GUI (called from main thread)."""
         for idx, finger in enumerate(self.fingers):
-            pos1 = scene['positions'][idx * 2]
-            pos2 = scene['positions'][idx * 2 + 1]
+            pos1 = pose['positions'][idx * 2]
+            pos2 = pose['positions'][idx * 2 + 1]
             finger.set_positions(pos1, pos2)
-            finger.speed_var.set(scene['speed'])
+            finger.speed_var.set(pose['speed'])
         
         # Trigger position update
         self.update_pending = True
         self.send_positions()
         self.status_var.set(f"Executing: {name}")
-        self.log(f"Scene: {name} (speed={scene['speed']})")
+        self.log(f"Pose: {name} (speed={pose['speed']})")
+    
+    def _apply_pose_from_config(self, pose_data, name, speeds=None):
+        """Apply a pose from YAML config format."""
+        positions = pose_data.get('positions', [0]*8)
+        if speeds is None:
+            speeds = [3] * 8  # Default speeds if not provided
+        
+        for idx, finger in enumerate(self.fingers):
+            pos1 = positions[idx * 2]
+            pos2 = positions[idx * 2 + 1]
+            finger.set_positions(pos1, pos2)
+            finger.speed_var.set(speeds[idx * 2])  # Set speed from sequence
+        
+        self.update_pending = True
+        self.send_positions()
+        self.status_var.set(f"Executing: {name}")
+        self.log(f"Pose: {name}")
     
     def log(self, message):
-        """Add message to log output."""
+        """Add message to log output with timestamp."""
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # HH:MM:SS.mmm
         self.log_text.config(state='normal')
-        self.log_text.insert(tk.END, f"{message}\n")
+        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
         self.log_text.see(tk.END)
         self.log_text.config(state='disabled')
     

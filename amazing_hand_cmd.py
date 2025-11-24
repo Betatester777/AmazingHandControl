@@ -1,14 +1,71 @@
 #!/usr/bin/env python3
 """Command-line tool to control the AmazingHand servos.
 
-Supports single moves, synchronous multi-servo moves, reading positions,
-named scenes from CSV, full movement sequences, and an interactive shell.
+OVERVIEW:
+=========
+This CLI provides scriptable control for the 8-servo robotic hand.
+Works with the same YAML configuration as amazing_hand_gui.py.
+
+CAPABILITIES:
+=============
+- Direct servo control: Set individual or multiple servo positions
+- Pose execution: Apply saved poses from YAML config
+- Sequence playback: Execute multi-step sequences with individual speeds
+- Position reading: Query current servo positions
+- Interactive mode: REPL for manual testing
+- Pose management: Add current positions to config
+
+USAGE MODES:
+============
+1. Single Servo:
+   python3 amazing_hand_cmd.py --id 1 --position 45 --speed 6
+
+2. Multiple Servos (synchronous):
+   python3 amazing_hand_cmd.py --id 1 2 3 --position 45 90 0
+
+3. Execute Pose:
+   python3 amazing_hand_cmd.py --config data/hand_config.yaml --pose open --enable
+
+4. Execute Sequence:
+   python3 amazing_hand_cmd.py --sequence demo --loop --enable
+
+5. Interactive REPL:
+   python3 amazing_hand_cmd.py --interactive
+
+6. Save Current Position:
+   python3 amazing_hand_cmd.py --add-pose my_pose
+
+SERVO MAPPING:
+==============
+Servos 1,3,5,7: Position control (0=open, 110=closed)
+Servos 2,4,6,8: Side control (-20=left, 0=center, +20=right)
+Even servos have inverted angles in hardware.
+
+YAML FORMAT:
+============
+poses:
+  pose_name:
+    positions: [p1, p2, p3, p4, p5, p6, p7, p8]
+
+sequences:
+  sequence_name:
+    steps:
+      - "pose_name:speed1,speed2,...,speed8|delay"
+      - "SLEEP:duration"
+
+DEPENDENCIES:
+=============
+- rustypot: Servo controller library
+- PyYAML: Configuration parsing
+- numpy: Angle conversions
 """
 import time
 import argparse
-import csv
 import sys
+import re
+from pathlib import Path
 import numpy as np
+import yaml
 from rustypot import Scs0009PyController
 
 
@@ -151,284 +208,228 @@ def read_position(controller, servo_id):
     return position_deg
 
 
-def load_sequence_from_csv(csv_file):
-    """
-    Load sequence from CSV file.
-    
-    CSV format (header optional):
-    id,hint,pos1,pos2,pos3,pos4,pos5,pos6,pos7,pos8,speed,sleep_before,sleep_after
-    
-    Each line represents one step in the sequence:
-    - id: Step identifier (optional)
-    - hint: Description of the step (optional)
-    - pos1-pos8: Target positions for servos 1-8 in degrees
-    - speed: Goal speed (1-6)
-    - sleep_before: Sleep time before executing this step (seconds)
-    - sleep_after: Sleep time after executing this step (seconds)
+def load_config(yaml_file):
+    """Load configuration from YAML file.
     
     Returns:
-        list: List of sequence steps, each as dict with 'id', 'hint', 'positions', 'speed', 'sleep_before', 'sleep_after'
+        dict: Configuration with 'poses' and 'sequences' keys
     """
-    sequence = []
+    yaml_path = Path(yaml_file)
+    if not yaml_path.exists():
+        print(f"Error: Config file not found: {yaml_file}")
+        return {'poses': {}, 'sequences': {}}
     
-    with open(csv_file, 'r') as f:
-        reader = csv.reader(f)
-        
-        # Skip comments and find header
-        id_col = None
-        hint_col = None
-        pos_start = 0
-        
-        for row in reader:
-            if not row or all(cell.strip() == '' for cell in row):
-                continue
-            if row[0].strip().startswith('#'):
-                continue
-            
-            # Check if this is a header row (look for 'pos1' or 'hint' keywords)
-            row_lower = [c.strip().lower() for c in row]
-            if 'id' in row_lower or 'pos1' in row_lower or 'hint' in row_lower:
-                # This is a header row
-                id_col = row_lower.index('id') if 'id' in row_lower else None
-                hint_col = row_lower.index('hint') if 'hint' in row_lower else None
-                pos_start = row_lower.index('pos1') if 'pos1' in row_lower else 0
-                continue  # Skip header, process data rows next
-            
-            # This is a data row
-            try:
-                # Parse id and hint if columns exist
-                step_id = row[id_col].strip() if id_col is not None and len(row) > id_col else str(len(sequence) + 1)
-                hint = row[hint_col].strip() if hint_col is not None and len(row) > hint_col else ""
-                
-                # Parse positions (8 servos)
-                positions = []
-                for i in range(8):
-                    pos_idx = pos_start + i
-                    if pos_idx < len(row):
-                        positions.append(float(row[pos_idx].strip()))
-                    else:
-                        positions.append(0.0)  # Default to 0 if missing
-                
-                # Parse speed (default 6 if not specified)
-                speed_idx = pos_start + 8
-                speed = int(row[speed_idx].strip()) if len(row) > speed_idx and row[speed_idx].strip() else 6
-                
-                # Parse sleep times (default 0 if not specified)
-                sleep_before_idx = pos_start + 9
-                sleep_after_idx = pos_start + 10
-                sleep_before = float(row[sleep_before_idx].strip()) if len(row) > sleep_before_idx and row[sleep_before_idx].strip() else 0.0
-                sleep_after = float(row[sleep_after_idx].strip()) if len(row) > sleep_after_idx and row[sleep_after_idx].strip() else 0.0
-                
-                sequence.append({
-                    'id': step_id,
-                    'hint': hint,
-                    'positions': positions,
-                    'speed': speed,
-                    'sleep_before': sleep_before,
-                    'sleep_after': sleep_after
-                })
-            except (ValueError, IndexError) as e:
-                print(f"Warning: Skipping invalid data row: {row} ({e})")
-                continue
-    
-    return sequence
+    try:
+        with yaml_path.open('r') as f:
+            config = yaml.safe_load(f) or {}
+            if 'poses' not in config:
+                config['poses'] = {}
+            if 'sequences' not in config:
+                config['sequences'] = {}
+            return config
+    except Exception as e:
+        print(f"Error loading config: {e}")
+        return {'poses': {}, 'sequences': {}}
 
 
-def load_scenes_from_csv(csv_file):
-    """
-    Load named scenes from CSV file.
+def save_config(config, yaml_file):
+    """Save configuration to YAML file with inline array formatting."""
+    yaml_path = Path(yaml_file)
     
-    CSV format (header optional):
-    scene,pos1,pos2,pos3,pos4,pos5,pos6,pos7,pos8,speed
+    try:
+        # Convert to YAML string
+        yaml_str = yaml.dump(config, default_flow_style=False, sort_keys=False)
+        
+        # Format positions arrays to be inline
+        yaml_str = re.sub(
+            r'positions:\s*\n\s*-\s*([\d\s\n-]+?)(?=\n\w)',
+            lambda m: 'positions: [' + ', '.join(m.group(1).replace('-', '').split()) + ']\n',
+            yaml_str,
+            flags=re.MULTILINE
+        )
+        
+        # Write to file
+        yaml_path.parent.mkdir(parents=True, exist_ok=True)
+        with yaml_path.open('w') as f:
+            f.write(yaml_str)
+        return True
+    except Exception as e:
+        print(f"Error saving config: {e}")
+        return False
+
+
+def parse_sequence_step(step_str, poses_dict):
+    """Parse a sequence step string.
     
-    Each line represents a named scene/pose:
-    - scene: Scene name (short, no spaces recommended)
-    - pos1-pos8: Target positions for servos 1-8 in degrees
-    - speed: Goal speed (1-6)
+    Format: pose_name:speed1,speed2,...,speed8|delay
+    or: SLEEP:duration
     
     Returns:
-        dict: Dictionary mapping scene names to scene data
+        dict: Step data with 'type', 'pose_name', 'positions', 'speeds', 'delay'
     """
-    scenes = {}
+    step_str = step_str.strip()
     
-    with open(csv_file, 'r') as f:
-        reader = csv.reader(f)
-        
-        # Skip comments and find header
-        scene_col = None
-        pos_start = 0
-        
-        for row in reader:
-            if not row or all(cell.strip() == '' for cell in row):
-                continue
-            if row[0].strip().startswith('#'):
-                continue
-            
-            # Check if this is a header row
-            row_lower = [c.strip().lower() for c in row]
-            if 'scene' in row_lower or 'name' in row_lower or 'pos1' in row_lower:
-                # This is a header row
-                scene_col = row_lower.index('scene') if 'scene' in row_lower else (row_lower.index('name') if 'name' in row_lower else 0)
-                pos_start = row_lower.index('pos1') if 'pos1' in row_lower else 1
-                continue  # Skip header, process data rows next
-            
-            # This is a data row
-            try:
-                # Parse scene name
-                scene_name = row[scene_col].strip() if scene_col is not None and len(row) > scene_col else ""
-                if not scene_name:
-                    continue  # Skip rows without scene name
-                
-                # Parse positions (8 servos)
-                positions = []
-                for i in range(8):
-                    pos_idx = pos_start + i
-                    if pos_idx < len(row):
-                        positions.append(float(row[pos_idx].strip()))
-                    else:
-                        positions.append(0.0)  # Default to 0 if missing
-                
-                # Parse speed (default 6 if not specified)
-                speed_idx = pos_start + 8
-                speed = int(row[speed_idx].strip()) if len(row) > speed_idx and row[speed_idx].strip() else 6
-                
-                scenes[scene_name] = {
-                    'positions': positions,
-                    'speed': speed
-                }
-            except (ValueError, IndexError) as e:
-                print(f"Warning: Skipping invalid data row: {row} ({e})")
-                continue
+    # Check for SLEEP command
+    if step_str.upper().startswith('SLEEP:'):
+        try:
+            duration = float(step_str.split(':', 1)[1].rstrip('s'))
+            return {'type': 'sleep', 'duration': duration}
+        except (ValueError, IndexError):
+            print(f"Warning: Invalid SLEEP format: {step_str}")
+            return None
     
-    return scenes
+    # Parse pose step: pose_name:speed1,speed2,...,speed8|delay
+    try:
+        # Split on | to separate delay
+        if '|' in step_str:
+            step_part, delay_str = step_str.split('|', 1)
+            delay = float(delay_str.rstrip('s'))
+        else:
+            step_part = step_str
+            delay = 0.0
+        
+        # Split on : to separate pose name and speeds
+        if ':' in step_part:
+            pose_name, speeds_str = step_part.split(':', 1)
+            speeds = [int(s) for s in speeds_str.split(',')]
+            if len(speeds) != 8:
+                print(f"Warning: Expected 8 speeds, got {len(speeds)} in: {step_str}")
+                speeds = speeds + [3] * (8 - len(speeds))  # Pad with default
+        else:
+            pose_name = step_part
+            speeds = [3] * 8  # Default speeds
+        
+        # Look up pose
+        if pose_name not in poses_dict:
+            print(f"Warning: Pose '{pose_name}' not found")
+            return None
+        
+        return {
+            'type': 'pose',
+            'pose_name': pose_name,
+            'positions': poses_dict[pose_name]['positions'],
+            'speeds': speeds,
+            'delay': delay
+        }
+    except Exception as e:
+        print(f"Warning: Failed to parse step '{step_str}': {e}")
+        return None
 
 
-def execute_scene_sequence(controller, scenes_dict, scene_keys, servo_ids=None, loop=False):
+def execute_sequence(controller, sequence_name, config, servo_ids=None, loop=False):
     """
-    Execute a sequence of named scenes.
+    Execute a named sequence from config.
     
     Args:
         controller: Scs0009PyController instance
-        scenes_dict: Dictionary of scenes from load_scenes_from_csv
-        scene_keys: List of scene names to execute in order (can include numbers for sleep delays)
-                   Scene names can include speed override: "scenename:speed"
+        sequence_name: Name of sequence to execute
+        config: Config dict with 'poses' and 'sequences'
         servo_ids: List of servo IDs to control (default: 1-8)
         loop: Whether to loop the sequence continuously
     """
     if servo_ids is None:
         servo_ids = list(range(1, 9))
     
+    if sequence_name not in config['sequences']:
+        print(f"Error: Sequence '{sequence_name}' not found")
+        return
+    
+    sequence = config['sequences'][sequence_name]
+    steps = sequence.get('steps', [])
+    
+    if not steps:
+        print(f"Error: Sequence '{sequence_name}' has no steps")
+        return
+    
     try:
+        iteration = 1
         while True:
-            for scene_key in scene_keys:
-                # Check if this is a number (sleep duration)
-                try:
-                    sleep_duration = float(scene_key)
-                    print(f"Sleeping for {sleep_duration}s...")
-                    time.sleep(sleep_duration)
-                    continue
-                except ValueError:
-                    pass  # Not a number, treat as scene name
-                
-                # Parse scene name and optional speed override
-                speed_override = None
-                if ':' in scene_key:
-                    scene_name, speed_str = scene_key.split(':', 1)
-                    try:
-                        speed_override = int(speed_str)
-                    except ValueError:
-                        print(f"Warning: Invalid speed '{speed_str}' in '{scene_key}', using default")
-                        scene_name = scene_key
-                else:
-                    scene_name = scene_key
-                
-                # Execute scene
-                if scene_name not in scenes_dict:
-                    print(f"Warning: Scene '{scene_name}' not found, skipping")
+            if loop and iteration > 1:
+                print(f"\n=== Loop iteration {iteration} ===")
+            
+            for i, step_str in enumerate(steps, 1):
+                step = parse_sequence_step(step_str, config['poses'])
+                if not step:
                     continue
                 
-                scene = scenes_dict[scene_name]
+                if step['type'] == 'sleep':
+                    print(f"  Step {i}: Sleeping {step['duration']}s...")
+                    time.sleep(step['duration'])
                 
-                # Use speed override if provided, otherwise use scene's default speed
-                speed = speed_override if speed_override is not None else scene['speed']
-                
-                # Calculate timeout based on speed (slower = more time needed)
-                # Speed 1 = slowest (15s), Speed 6 = fastest (3s)
-                timeout = 15.0 - (speed - 1) * 2.4  # 15s at speed 1, down to 3s at speed 6
-                
-                # Execute movement
-                print(f"Scene: {scene_name} [speed: {speed}]")
-                success = set_positions_sync(
-                    controller,
-                    servo_ids,
-                    scene['positions'],
-                    speed,
-                    wait=True,
-                    timeout=timeout
-                )
-                
-                if not success:
-                    print(f"Warning: Scene '{scene_name}' did not complete within timeout")
+                elif step['type'] == 'pose':
+                    print(f"  Step {i}: {step['pose_name']} (speeds: {','.join(map(str, step['speeds']))}) delay: {step['delay']}s")
+                    
+                    # Set positions with individual speeds
+                    success = set_positions_sync(
+                        controller,
+                        servo_ids,
+                        step['positions'],
+                        speeds=step['speeds'],
+                        wait=True,
+                        timeout=5.0
+                    )
+                    
+                    if not success:
+                        print(f"    Warning: Step did not complete within timeout")
+                    
+                    # Delay after movement
+                    if step['delay'] > 0:
+                        time.sleep(step['delay'])
             
             if not loop:
                 break
+            
+            iteration += 1
+    
     except KeyboardInterrupt:
-        print("\nSequence interrupted by user")
+        print("\nSequence interrupted")
+    
+    print("Sequence execution completed.")
 
 
-def execute_sequence(controller, sequence, servo_ids=None, loop=False):
+def execute_pose(controller, pose_name, config, servo_ids=None, speed=None):
     """
-    Execute a sequence of movements.
+    Execute a single named pose.
     
     Args:
         controller: Scs0009PyController instance
-        sequence: List of sequence steps from load_sequence_from_csv
+        pose_name: Name of pose to execute
+        config: Config dict with 'poses' and 'sequences'
         servo_ids: List of servo IDs to control (default: 1-8)
-        loop: Whether to loop the sequence continuously
+        speed: Speed override (1-6), or None to use default
     """
     if servo_ids is None:
         servo_ids = list(range(1, 9))
     
-    try:
-        while True:
-            for step in sequence:
-                step_id = step.get('id', '')
-                hint = step.get('hint', '')
-                
-                # Sleep before
-                if step['sleep_before'] > 0:
-                    print(f"Step {step_id}: Waiting {step['sleep_before']}s before...")
-                    time.sleep(step['sleep_before'])
-                
-                # Execute movement
-                hint_str = f": {hint}" if hint else ""
-                print(f"Step {step_id}{hint_str} [speed: {step['speed']}]")
-                success = set_positions_sync(
-                    controller,
-                    servo_ids,
-                    step['positions'],
-                    speeds=step['speed'],
-                    wait=True,
-                    timeout=5.0
-                )
-                
-                if not success:
-                    print(f"Warning: Step {step_id} did not complete within timeout")
-                
-                # Sleep after
-                if step['sleep_after'] > 0:
-                    print(f"Step {step_id}: Waiting {step['sleep_after']}s after...")
-                    time.sleep(step['sleep_after'])
-            
-            if not loop:
-                break
-            
-            print(f"\nSequence completed. Looping...\n")
+    if pose_name not in config['poses']:
+        print(f"Error: Pose '{pose_name}' not found")
+        return False
     
-    except KeyboardInterrupt:
-        print(f"\nSequence interrupted")
+    pose = config['poses'][pose_name]
+    positions = pose['positions']
     
-    print(f"Sequence execution completed.")
+    # Use provided speed or default to 3
+    if speed is None:
+        speed = 3
+    
+    speeds = [speed] * 8
+    
+    print(f"Executing pose: {pose_name} (speed: {speed})")
+    success = set_positions_sync(
+        controller,
+        servo_ids,
+        positions,
+        speeds=speeds,
+        wait=True,
+        timeout=5.0
+    )
+    
+    if success:
+        print(f"✓ Pose '{pose_name}' executed")
+    else:
+        print(f"✗ Pose '{pose_name}' did not complete within timeout")
+    
+    return success
 
 
 def interactive_mode(controller):
@@ -521,17 +522,17 @@ Examples:
   # Print all current positions
   %(prog)s --print
   
-  # Execute sequence from CSV file
-  %(prog)s --sequence movements.csv --enable
+  # Execute a named pose from YAML config
+  %(prog)s --config data/hand_config.yaml --pose open --enable
   
-    # Execute named scenes
-    %(prog)s --scenes data/poses.csv --keys open close ok --enable
-  
-    # Add current position as new scene to file
-    %(prog)s --add-scene data/poses.csv newpose --speed 3
+  # Execute a sequence from YAML config
+  %(prog)s --config data/hand_config.yaml --sequence demo --enable
   
   # Execute sequence in a loop
-  %(prog)s --sequence movements.csv --loop --enable
+  %(prog)s --config data/hand_config.yaml --sequence demo --loop --enable
+  
+  # Add current position as new pose to YAML config
+  %(prog)s --config data/hand_config.yaml --add-pose newpose
   
   # Interactive mode
   %(prog)s --interactive
@@ -559,16 +560,16 @@ Examples:
                         help='Apply to all 8 servos (IDs 1-8)')
     parser.add_argument('--print', action='store_true',
                         help='Print all current servo positions (IDs 1-8)')
+    parser.add_argument('--config', type=str, default='data/hand_config.yaml',
+                        help='YAML config file (default: data/hand_config.yaml)')
+    parser.add_argument('--pose', type=str,
+                        help='Execute a named pose from config')
     parser.add_argument('--sequence', type=str,
-                        help='CSV file with movement sequence')
-    parser.add_argument('--scenes', type=str,
-                        help='CSV file with named scenes/poses')
-    parser.add_argument('--keys', type=str, nargs='+',
-                        help='Scene names to execute in order (use with --scenes)')
-    parser.add_argument('--add-scene', type=str, nargs=2, metavar=('FILE', 'SCENE_NAME'),
-                        help='Add current position as new scene to CSV file')
+                        help='Execute a named sequence from config')
+    parser.add_argument('--add-pose', type=str, metavar='POSE_NAME',
+                        help='Add current position as new pose to config file')
     parser.add_argument('--loop', action='store_true',
-                        help='Loop the sequence continuously (use with --sequence or --scenes)')
+                        help='Loop the sequence continuously (use with --sequence)')
     parser.add_argument('--interactive', '-i', action='store_true',
                         help='Start interactive mode')
     
@@ -599,9 +600,9 @@ Examples:
         print(" ".join(positions))
         return
     
-    # Add scene mode - save current position to CSV
-    if args.add_scene:
-        csv_file, scene_name = args.add_scene
+    # Add pose mode - save current position to YAML
+    if args.add_pose:
+        pose_name = args.add_pose
         
         # Read current positions
         positions = []
@@ -616,33 +617,26 @@ Examples:
                 print(f"Error reading servo {servo_id}: {e}")
                 return
         
-        # Determine speed (from --speed arg or default to 3)
-        speed = args.speed[0] if args.speed else 3
+        # Load existing config
+        config = load_config(args.config)
         
-        # Check if file exists and has header
-        import os
-        file_exists = os.path.exists(csv_file)
+        # Add new pose
+        config['poses'][pose_name] = {
+            'positions': positions
+        }
         
-        # Append to file
-        with open(csv_file, 'a') as f:
-            # Add header if new file
-            if not file_exists:
-                f.write("scene, pos1, pos2, pos3, pos4, pos5, pos6, pos7, pos8, speed\n")
-            
-            # Write scene data
-            pos_str = ", ".join(f"{p:4d}" for p in positions)
-            f.write(f"{scene_name}, {pos_str}, {speed:5d}\n")
-        
-        print(f"Added scene '{scene_name}' to {csv_file}")
-        print(f"Positions: {' '.join(str(p) for p in positions)}")
-        print(f"Speed: {speed}")
+        # Save config
+        if save_config(config, args.config):
+            print(f"✓ Added pose '{pose_name}' to {args.config}")
+            print(f"  Positions: {positions}")
+        else:
+            print(f"✗ Failed to save config")
         return
     
-    # Scenes mode
-    if args.scenes:
-        print(f"Loading scenes from {args.scenes}...")
-        scenes = load_scenes_from_csv(args.scenes)
-        print(f"Loaded {len(scenes)} scenes: {', '.join(scenes.keys())}")
+    # Pose mode
+    if args.pose:
+        # Load config
+        config = load_config(args.config)
         
         # Enable torque if requested
         if args.enable:
@@ -650,19 +644,21 @@ Examples:
                 controller.write_torque_enable(servo_id, 1)
             print("Enabled torque for all servos")
         
-        # Check if scene keys provided
-        if not args.keys:
-            parser.error("--keys is required when using --scenes")
-        
-        # Execute scene sequence
-        execute_scene_sequence(controller, scenes, args.keys, loop=args.loop)
+        # Execute pose
+        speed = args.speed[0] if args.speed else None
+        execute_pose(controller, args.pose, config, speed=speed)
         return
     
     # Sequence mode
     if args.sequence:
-        print(f"Loading sequence from {args.sequence}...")
-        sequence = load_sequence_from_csv(args.sequence)
-        print(f"Loaded {len(sequence)} steps")
+        # Load config
+        config = load_config(args.config)
+        print(f"Loading sequence '{args.sequence}' from {args.config}...")
+        
+        if args.sequence not in config['sequences']:
+            print(f"Error: Sequence '{args.sequence}' not found in config")
+            print(f"Available sequences: {', '.join(config['sequences'].keys())}")
+            return
         
         # Enable torque if requested
         if args.enable:
@@ -671,7 +667,7 @@ Examples:
             print("Enabled torque for all servos")
         
         # Execute sequence
-        execute_sequence(controller, sequence, loop=args.loop)
+        execute_sequence(controller, args.sequence, config, loop=args.loop)
         return
     
     # Handle --all flag or single position without ID
