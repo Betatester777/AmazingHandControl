@@ -43,7 +43,9 @@ poses:
   - Servo 7: Thumb position
   - Servo 8: Thumb side
 
-- **Range**: 0-110° for position servos, -20 to +20° for side servos
+- **Close/Open slider range**: 0-110° per finger (0=open, 110=closed)
+- **Side slider range**: -40° (left) to +40° (right)
+- **Stored servo values**: Because the YAML stores the combined values (base ± side), expect actual servo commands to fall roughly between -40° and 150°
 - **Note**: Even-numbered servos (2,4,6,8) have inverted angles in hardware
 
 ### Naming Rules

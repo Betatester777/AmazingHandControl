@@ -67,28 +67,25 @@ Features:
 All poses and sequences are stored in `data/hand_config.yaml`:
 
 **Saving Poses:**
-1. Position fingers using sliders or keyboard
+1. Position fingers using sliders or keyboard shortcuts
 2. Enter a name in the "Name:" field
-3. Set speed (1-6)
-4. Click "Save Pose"
+3. Click "➕ Add New" in the Pose Management section
+  - Speeds only affect how the sliders move; saved poses store the 8 servo positions only
 
 **Loading Poses:**
 - Select from dropdown and click "Set Pose"
 
 **Sequence Management:**
-1. Click "Execute Pose Seq" to open the sequence manager
+1. Click "🔧 Manage" in the Sequence Player to open the sequence manager
 2. **Saved Sequences** (left panel):
-   - View all saved sequences
-   - Double-click or click "Execute" to run
-   - Click "Edit" to load into builder for modification
-   - Click "Delete" to remove
+  - View, execute, edit, or delete existing sequences
+  - Double-click or click "▶ Execute" to run a saved entry once
 3. **Sequence Builder** (right panel):
-   - Double-click poses from "Available Poses" to add
-   - Enter delay (seconds) and click "Add →" or "Delay"
-   - Use ↑/↓ to reorder steps
-   - Check "Loop" for continuous playback
-   - Enter sequence name and click "Save Sequence"
-   - Click "Execute" to run without saving
+  - Double-click poses from "Available Poses" to add them as steps
+  - Choose individual servo speeds and delays for each step; steps are stored as `"pose:s1,s2,...,s8|delay"`
+  - Use ↑/↓ to reorder steps or insert dedicated sleep steps with the "⏱ Delay" button
+  - Enter a sequence name and click "💾 Save Sequence" to persist; use "▶ Execute" to test without saving
+4. Back in the main window, use the "Loop" checkbox in the Sequence Player if you need continuous playback
 
 **YAML Format Example:**
 
@@ -96,24 +93,22 @@ All poses and sequences are stored in `data/hand_config.yaml`:
 poses:
   open:
     positions: [0, 0, 0, 0, 0, 0, 0, 0]
-    speed: 3
   close:
-    positions: [110, 110, 110, 110, 110, 110, 110, 110]
-    speed: 3
+    positions: [110, 0, 110, 0, 110, 0, 110, 0]
 
 sequences:
   demo:
-    loop: false
     steps:
-      - open|2.0s
-      - close|2.0s
-      - SLEEP:1.0s
+      - "open:3,3,3,3,3,3,3,3|2.0s"
+      - "close:3,3,3,3,3,3,3,3|2.0s"
+      - "SLEEP:1.0s"
   wave:
-    loop: true
     steps:
-      - greeting|1.5s
-      - open|1.5s
+      - "close:5,5,5,5,5,5,5,5|0.8s"
+      - "open:2,2,2,2,2,2,2,2|0.8s"
 ```
+
+Loop behavior is handled at runtime (GUI checkbox or `--loop` flag in the CLI) and is no longer stored in YAML.
 
 The GUI automatically creates `data/hand_config.yaml` if it doesn't exist.
 
