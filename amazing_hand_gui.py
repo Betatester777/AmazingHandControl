@@ -1644,6 +1644,7 @@ class AmazingHandGUI:
             
             pose_data = poses[selected_name]
             positions = pose_data.get('positions', [0]*8)
+            target_snapshot = list(positions)
 
             # Apply positions to fingers (keep current speeds)
             for idx, finger in enumerate(self.fingers):
@@ -1656,6 +1657,7 @@ class AmazingHandGUI:
             self.send_positions()
 
             self.status_var.set(f"Set pose '{selected_name}'")
+            self._log_pose_completion(selected_name, target_snapshot)
         
         except Exception as e:
             self.status_var.set(f"Error setting pose: {e}")
@@ -2161,7 +2163,7 @@ class AmazingHandGUI:
         self.update_pending = True
         self.send_positions()
         self.status_var.set(f"Executing: {name}")
-        self.log(f"Pose: {name} (speed={pose['speed']})")
+        self._log_pose_completion(name, pose.get('positions', []))
     
     def _apply_pose_from_config(self, pose_data, name, speeds=None):
         """Apply a pose from YAML config format."""
@@ -2178,7 +2180,35 @@ class AmazingHandGUI:
         self.update_pending = True
         self.send_positions()
         self.status_var.set(f"Executing: {name}")
-        self.log(f"Pose: {name}")
+        self._log_pose_completion(name, positions)
+
+    def _read_actual_positions(self):
+        """Read current servo positions in degrees; returns None if unavailable."""
+        if not self.connected or self.controller is None:
+            return None
+        readings = []
+        try:
+            for servo_id in range(1, 9):
+                pos = self.controller.read_present_position(servo_id)
+                if isinstance(pos, np.ndarray):
+                    pos = pos.item()
+                deg = np.rad2deg(pos)
+                if servo_id % 2 == 0:
+                    deg = -deg
+                readings.append(int(round(deg)))
+            return readings
+        except Exception:
+            return None
+
+    def _log_pose_completion(self, name, target_positions):
+        """Write target vs. actual servo positions to the log."""
+        target_repr = '[' + ', '.join(str(p) for p in target_positions) + ']'
+        actual_positions = self._read_actual_positions()
+        if actual_positions is None:
+            actual_repr = '<unavailable>'
+        else:
+            actual_repr = '[' + ', '.join(str(int(p)) for p in actual_positions) + ']'
+        self.log(f"Pose '{name}' complete → target={target_repr} current={actual_repr}")
     
     def log(self, message):
         """Add message to log output with timestamp."""
