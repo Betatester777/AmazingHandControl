@@ -1680,8 +1680,13 @@ class AmazingHandGUI:
             self.send_positions()
 
             self.status_var.set(f"Set pose '{selected_name}'")
-            # Delay logging to allow servos to reach target and telemetry to update
-            self.root.after(500, lambda: self._log_pose_completion(selected_name, target_snapshot))
+            # Calculate delay: estimate movement time based on max position change
+            # Speed ranges 1-6, assume ~200ms per 10° at speed 3
+            max_movement = max(abs(positions[i] - self.fingers[i//2].get_positions()[i%2]) for i in range(8))
+            avg_speed = sum(f.get_speed() for f in self.fingers) / len(self.fingers)
+            # Base delay + movement-dependent delay (slower speeds need more time)
+            delay_ms = int(500 + (max_movement / 10) * (200 / avg_speed) * 3)
+            self.root.after(delay_ms, lambda: self._log_pose_completion(selected_name, target_snapshot))
         
         except Exception as e:
             self.status_var.set(f"Error setting pose: {e}")
@@ -2187,8 +2192,8 @@ class AmazingHandGUI:
         self.update_pending = True
         self.send_positions()
         self.status_var.set(f"Executing: {name}")
-        # Delay logging to allow servos to reach target and telemetry to update
-        self.root.after(500, lambda: self._log_pose_completion(name, pose.get('positions', [])))
+        # Wait for servos to reach target (using pose speed)
+        self.root.after(2000, lambda: self._log_pose_completion(name, pose.get('positions', [])))
     
     def _apply_pose_from_config(self, pose_data, name, speeds=None):
         """Apply a pose from YAML config format."""
@@ -2205,8 +2210,8 @@ class AmazingHandGUI:
         self.update_pending = True
         self.send_positions()
         self.status_var.set(f"Executing: {name}")
-        # Delay logging to allow servos to reach target and telemetry to update
-        self.root.after(500, lambda: self._log_pose_completion(name, positions))
+        # Wait for servos to reach target
+        self.root.after(2000, lambda: self._log_pose_completion(name, positions))
 
     def _read_actual_positions(self):
         """Return the latest measured servo positions, if available."""
