@@ -1055,33 +1055,45 @@ class AmazingHandGUI:
                     try:
                         # Read position
                         current_pos_rad = self.controller.read_present_position(servo_id)
-                        if isinstance(current_pos_rad, np.ndarray):
-                            current_pos_rad = current_pos_rad.item()
+                        if isinstance(current_pos_rad, (np.ndarray, list)):
+                            if isinstance(current_pos_rad, np.ndarray):
+                                current_pos_rad = current_pos_rad.item()
+                            else:
+                                current_pos_rad = current_pos_rad[0] if current_pos_rad else 0
                         current_pos = float(np.rad2deg(current_pos_rad))
                         if servo_id % 2 == 0:
                             current_pos = -current_pos
                         with self.actual_pos_lock:
                             if self.latest_actual_positions is None:
                                 self.latest_actual_positions = [0] * 8
-                            self.latest_actual_positions[idx] = int(round(float(current_pos)))
+                            self.latest_actual_positions[idx] = int(round(current_pos))
                             self.latest_actual_timestamp = time.time()
                         
                         # Read load (force)
                         load = self.controller.read_present_load(servo_id)
-                        if isinstance(load, np.ndarray):
-                            load = load.item()
+                        if isinstance(load, (np.ndarray, list)):
+                            if isinstance(load, np.ndarray):
+                                load = load.item()
+                            else:
+                                load = load[0] if load else 0
                         load = float(load)
                         
                         # Read temperature
                         temp = self.controller.read_present_temperature(servo_id)
-                        if isinstance(temp, np.ndarray):
-                            temp = temp.item()
+                        if isinstance(temp, (np.ndarray, list)):
+                            if isinstance(temp, np.ndarray):
+                                temp = temp.item()
+                            else:
+                                temp = temp[0] if temp else 0
                         temp = float(temp)
                         
                         # Read voltage
                         voltage = self.controller.read_present_voltage(servo_id)
-                        if isinstance(voltage, np.ndarray):
-                            voltage = voltage.item()
+                        if isinstance(voltage, (np.ndarray, list)):
+                            if isinstance(voltage, np.ndarray):
+                                voltage = voltage.item()
+                            else:
+                                voltage = voltage[0] if voltage else 0
                         voltage = float(voltage)
                         
                         # Get target position from finger controls
@@ -2206,8 +2218,11 @@ class AmazingHandGUI:
         try:
             for servo_id in range(1, 9):
                 pos = self.controller.read_present_position(servo_id)
-                if isinstance(pos, np.ndarray):
-                    pos = pos.item()
+                if isinstance(pos, (np.ndarray, list)):
+                    if isinstance(pos, np.ndarray):
+                        pos = pos.item()
+                    else:
+                        pos = pos[0] if pos else 0
                 deg = float(np.rad2deg(pos))
                 if servo_id % 2 == 0:
                     deg = -deg
