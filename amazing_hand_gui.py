@@ -1680,7 +1680,8 @@ class AmazingHandGUI:
             self.send_positions()
 
             self.status_var.set(f"Set pose '{selected_name}'")
-            self._log_pose_completion(selected_name, target_snapshot)
+            # Delay logging to allow servos to reach target and telemetry to update
+            self.root.after(500, lambda: self._log_pose_completion(selected_name, target_snapshot))
         
         except Exception as e:
             self.status_var.set(f"Error setting pose: {e}")
@@ -2186,7 +2187,8 @@ class AmazingHandGUI:
         self.update_pending = True
         self.send_positions()
         self.status_var.set(f"Executing: {name}")
-        self._log_pose_completion(name, pose.get('positions', []))
+        # Delay logging to allow servos to reach target and telemetry to update
+        self.root.after(500, lambda: self._log_pose_completion(name, pose.get('positions', [])))
     
     def _apply_pose_from_config(self, pose_data, name, speeds=None):
         """Apply a pose from YAML config format."""
@@ -2203,7 +2205,8 @@ class AmazingHandGUI:
         self.update_pending = True
         self.send_positions()
         self.status_var.set(f"Executing: {name}")
-        self._log_pose_completion(name, positions)
+        # Delay logging to allow servos to reach target and telemetry to update
+        self.root.after(500, lambda: self._log_pose_completion(name, positions))
 
     def _read_actual_positions(self):
         """Return the latest measured servo positions, if available."""
