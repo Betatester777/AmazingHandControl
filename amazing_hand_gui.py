@@ -96,6 +96,7 @@ import os
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
+from tkinter import font as tkfont
 from textwrap import dedent
 import numpy as np
 from rustypot import Scs0009PyController
@@ -104,12 +105,15 @@ import time
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from datetime import datetime
 import yaml
 
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = DATA_DIR / "hand_config.yaml"  # YAML with poses and sequences
+APP_CONFIG_FILE = BASE_DIR / "config.yaml"  # Application settings
 KEYBOARD_HELP_TEXT = dedent(
         """
         KEYBOARD CONTROLS
@@ -146,9 +150,78 @@ KEYBOARD_HELP_TEXT = dedent(
 )
 
 
+def load_app_config():
+    """Load application configuration from config.yaml.
+    
+    Returns:
+        dict: Application configuration with serial ports, limits, speeds, paths
+    """
+    default_config = {
+        'serial': {
+            'port_windows': 'COM9',
+            'port_linux': '/dev/ttyACM0',
+            'baudrate': 1000000,
+            'baudrate_options': [9600, 115200, 1000000]
+        },
+        'servos': {
+            'pointer': [1, 2],
+            'middle': [3, 4],
+            'ring': [5, 6],
+            'thumb': [7, 8],
+            'all_ids': [1, 2, 3, 4, 5, 6, 7, 8]
+        },
+        'limits': {
+            'servo_min': -40,
+            'servo_max': 110,
+            'base_min': 0,
+            'base_max': 110,
+            'side_min': -40,
+            'side_max': 40
+        },
+        'speeds': {
+            'default': 3,
+            'min': 1,
+            'max': 6
+        },
+        'auto_extremes': {
+            'left_open': [25, -40],
+            'right_open': [-40, 25],
+            'left_closed': [110, 110],
+            'right_closed': [110, 110],
+            'center_open': [0, 0],
+            'center_closed': [110, 110]
+        },
+        'paths': {
+            'poses_sequences_file': 'data/hand_config.yaml'
+        }
+    }
+    
+    if not APP_CONFIG_FILE.exists():
+        return default_config
+    
+    try:
+        with APP_CONFIG_FILE.open('r') as f:
+            config = yaml.safe_load(f) or {}
+            # Merge with defaults
+            for key in default_config:
+                if key not in config:
+                    config[key] = default_config[key]
+                elif isinstance(default_config[key], dict):
+                    for subkey in default_config[key]:
+                        if subkey not in config[key]:
+                            config[key][subkey] = default_config[key][subkey]
+            return config
+    except Exception as e:
+        print(f"Error loading app config: {e}, using defaults")
+        return default_config
+
+
 def default_serial_port():
-    """Return platform-specific default serial port."""
-    return 'COM9' if os.name == 'nt' else '/dev/ttyACM0'
+    """Return platform-specific default serial port from config."""
+    config = load_app_config()
+    if os.name == 'nt':
+        return config['serial']['port_windows']
+    return config['serial']['port_linux']
 
 
 def ensure_data_dir():
@@ -449,9 +522,19 @@ class FingerControl:
         self.servo2_id = servo2_id
         self.controller = controller
         self.update_callback = update_callback
+        self._suppress_events = False
+        self.mode_var = tk.StringVar(value='auto')
+        self._led_mode = 'idle'
+        self._led_blink_job = None
+        self._led_on = False
+        
+        # Load app config for defaults
+        self.app_config = load_app_config()
         
         # Create frame for this finger
         self.frame = ttk.LabelFrame(parent, text=finger_name, padding=10)
+        self.frame.columnconfigure(0, weight=1)
+        self.frame.columnconfigure(1, weight=1)
         
         # Mimic checkbox
         self.mimic_var = tk.BooleanVar(value=False)
@@ -459,20 +542,80 @@ class FingerControl:
             self.frame, text="Mimic",
             variable=self.mimic_var
         )
-        self.mimic_check.grid(row=0, column=0, columnspan=2, sticky='w')
+        self.mimic_check.grid(row=0, column=0, sticky='w')
         attach_tooltip(self.mimic_check, "When enabled, this finger mirrors close/open changes to other mimicking fingers.")
+
+        mode_frame = ttk.Frame(self.frame)
+        mode_frame.grid(row=0, column=1, sticky='e')
+        led_bg = self._resolve_background_color()
+        self.led_canvas = tk.Canvas(
+            mode_frame, width=16, height=16, highlightthickness=0, bd=0,
+            background=led_bg
+        )
+        self.led_indicator = self.led_canvas.create_oval(2, 2, 14, 14, fill='#5a5a5a', outline='#222222', width=1.5)
+        self.led_canvas.pack(side='left', padx=(0, 6))
+        attach_tooltip(self.led_canvas, "Finger status: blinking green=moving, red=blocked, gray=idle.")
+        ttk.Radiobutton(mode_frame, text="Auto", value='auto', variable=self.mode_var,
+                        command=self._update_mode_visibility).pack(side='left', padx=2)
+        ttk.Radiobutton(mode_frame, text="Raw", value='raw', variable=self.mode_var,
+                        command=self._update_mode_visibility).pack(side='left', padx=2)
+        attach_tooltip(mode_frame, "Auto: base+offset sliders. Raw: direct control of both servo targets.")
         
-        # Position sliders
-        ttk.Label(self.frame, text="Close/Open:").grid(row=1, column=0, sticky='w')
+        # Container that holds either auto or raw controls
+        self.mode_stack = ttk.Frame(self.frame)
+        self.mode_stack.grid(row=1, column=0, columnspan=2, sticky='nsew', pady=(5, 0))
+        self.mode_stack.columnconfigure(0, weight=1)
+        self.mode_stack.columnconfigure(1, weight=1)
+        
+        # Auto mode controls
+        self.auto_frame = ttk.Frame(self.mode_stack)
+        self.auto_frame.grid(row=0, column=0, columnspan=2, sticky='nsew')
+        self._build_auto_controls(self.auto_frame)
+        
+        # Raw mode controls
+        self.raw_frame = ttk.Frame(self.mode_stack)
+        self.raw_frame.grid(row=0, column=0, columnspan=2, sticky='nsew')
+        self._build_raw_controls(self.raw_frame)
+        
+        # Speed control (shared)
+        ttk.Label(self.frame, text="Speed:").grid(row=2, column=0, columnspan=2, pady=(10,0))
+        default_speed = self.app_config['speeds']['default']
+        self.speed_var = tk.IntVar(value=default_speed)
+        speed_frame = ttk.Frame(self.frame)
+        speed_frame.grid(row=3, column=0, columnspan=2)
+        speed_min = self.app_config['speeds']['min']
+        speed_max = self.app_config['speeds']['max']
+        for i in range(speed_min, speed_max + 1):
+            ttk.Radiobutton(
+                speed_frame, text=str(i), value=i,
+                variable=self.speed_var
+            ).pack(side='left', padx=2)
+        attach_tooltip(speed_frame, "Servo motion speed (1=slowest, 6=fastest).")
+        
+        # Center button (auto mode only)
+        self.center_btn = ttk.Button(
+            self.frame, text="⊙ Center", 
+            command=self.center_finger
+        )
+        self.center_btn.grid(row=4, column=0, columnspan=2, pady=(10,0), sticky='ew')
+        attach_tooltip(self.center_btn, "Reset left/right offset to 0° for this finger.")
+        
+        self._update_mode_visibility()
+        self.update_activity_state(False, False)
+        
+    def _build_auto_controls(self, parent):
+        ttk.Label(parent, text="Close/Open:").grid(row=0, column=0, sticky='w')
         self.pos_var = tk.IntVar(value=0)
+        base_min = self.app_config['limits']['base_min']
+        base_max = self.app_config['limits']['base_max']
         self.pos_slider = ttk.Scale(
-            self.frame, from_=110, to=0, orient='vertical',
+            parent, from_=base_max, to=base_min, orient='vertical',
             variable=self.pos_var, command=self.on_position_change,
             length=200
         )
-        self.pos_slider.grid(row=2, column=0, padx=5)
-        self.pos_label = ttk.Label(self.frame, text="0°")
-        self.pos_label.grid(row=3, column=0)
+        self.pos_slider.grid(row=1, column=0, padx=5)
+        self.pos_label = ttk.Label(parent, text="0°")
+        self.pos_label.grid(row=2, column=0)
         attach_tooltip(self.pos_slider, "Drag or scroll to close/open the finger (0°=open, 110°=closed).")
         
         # Bind mouse wheel to position slider
@@ -481,40 +624,50 @@ class FingerControl:
         self.pos_slider.bind('<MouseWheel>', self.on_mouse_wheel)  # Windows/Mac
         
         # Side-to-side slider
-        ttk.Label(self.frame, text="Left/Right:").grid(row=1, column=1, sticky='w')
+        ttk.Label(parent, text="Left/Right:").grid(row=0, column=1, sticky='w')
         self.side_var = tk.IntVar(value=0)
+        side_min = self.app_config['limits']['side_min']
+        side_max = self.app_config['limits']['side_max']
         self.side_slider = ttk.Scale(
-            self.frame, from_=40, to=-40, orient='horizontal',
+            parent, from_=side_max, to=side_min, orient='horizontal',
             variable=self.side_var, command=self.on_side_change,
             length=200
         )
-        self.side_slider.grid(row=2, column=1, padx=5)
-        self.side_label = ttk.Label(self.frame, text="0°")
-        self.side_label.grid(row=3, column=1)
+        self.side_slider.grid(row=1, column=1, padx=5)
+        self.side_label = ttk.Label(parent, text="0°")
+        self.side_label.grid(row=2, column=1)
         attach_tooltip(self.side_slider, "Drag to move finger laterally (negative=left, positive=right).")
         
-        # Speed control
-        ttk.Label(self.frame, text="Speed:").grid(row=4, column=0, columnspan=2, pady=(10,0))
-        self.speed_var = tk.IntVar(value=3)
-        speed_frame = ttk.Frame(self.frame)
-        speed_frame.grid(row=5, column=0, columnspan=2)
-        for i in range(1, 7):
-            ttk.Radiobutton(
-                speed_frame, text=str(i), value=i,
-                variable=self.speed_var
-            ).pack(side='left', padx=2)
-        attach_tooltip(speed_frame, "Servo motion speed (1=slowest, 6=fastest).")
-        
-        # Center button
-        self.center_btn = ttk.Button(
-            self.frame, text="⊙ Center", 
-            command=self.center_finger
+    def _build_raw_controls(self, parent):
+        ttk.Label(parent, text="Servo 1 (raw)").grid(row=0, column=0, sticky='w')
+        ttk.Label(parent, text="Servo 2 (raw)").grid(row=0, column=1, sticky='w')
+        self.raw_pos1_var = tk.IntVar(value=0)
+        self.raw_pos2_var = tk.IntVar(value=0)
+        servo_min = self.app_config['limits']['servo_min']
+        servo_max = self.app_config['limits']['servo_max']
+        self.raw_slider1 = ttk.Scale(
+            parent, from_=servo_max, to=servo_min, orient='vertical',
+            variable=self.raw_pos1_var, command=lambda v: self._on_raw_change(1, v),
+            length=200
         )
-        self.center_btn.grid(row=6, column=0, columnspan=2, pady=(10,0), sticky='ew')
-        attach_tooltip(self.center_btn, "Reset left/right offset to 0° for this finger.")
+        self.raw_slider2 = ttk.Scale(
+            parent, from_=servo_max, to=servo_min, orient='vertical',
+            variable=self.raw_pos2_var, command=lambda v: self._on_raw_change(2, v),
+            length=200
+        )
+        self.raw_slider1.grid(row=1, column=0, padx=5)
+        self.raw_slider2.grid(row=1, column=1, padx=5)
+        self.raw_pos1_label = ttk.Label(parent, text="0°")
+        self.raw_pos2_label = ttk.Label(parent, text="0°")
+        self.raw_pos1_label.grid(row=2, column=0)
+        self.raw_pos2_label.grid(row=2, column=1)
+        attach_tooltip(self.raw_slider1, "Directly command servo 1 target angle.")
+        attach_tooltip(self.raw_slider2, "Directly command servo 2 target angle.")
     
     def center_finger(self):
         """Center this finger's side-to-side movement."""
+        if self.mode_var.get() == 'raw':
+            return
         self.side_var.set(0)
         self.on_side_change(0)
     
@@ -529,8 +682,20 @@ class FingerControl:
 
     def adjust_position(self, delta):
         """Adjust close/open slider by delta degrees."""
+        if self.mode_var.get() == 'raw':
+            servo_min = self.app_config['limits']['servo_min']
+            servo_max = self.app_config['limits']['servo_max']
+            current = self.raw_pos1_var.get()
+            new_val = clamp(current + delta, servo_min, servo_max)
+            if new_val == current:
+                return None
+            self.raw_pos1_var.set(new_val)
+            self._on_raw_change(1, new_val)
+            return new_val
+        base_min = self.app_config['limits']['base_min']
+        base_max = self.app_config['limits']['base_max']
         current = self.pos_var.get()
-        new_val = clamp(current + delta, 0, 110)
+        new_val = clamp(current + delta, base_min, base_max)
         if new_val == current:
             return None
         self.pos_var.set(new_val)
@@ -539,8 +704,20 @@ class FingerControl:
 
     def adjust_side(self, delta):
         """Adjust side-to-side slider by delta degrees."""
+        if self.mode_var.get() == 'raw':
+            servo_min = self.app_config['limits']['servo_min']
+            servo_max = self.app_config['limits']['servo_max']
+            current = self.raw_pos2_var.get()
+            new_val = clamp(current + delta, servo_min, servo_max)
+            if new_val == current:
+                return None
+            self.raw_pos2_var.set(new_val)
+            self._on_raw_change(2, new_val)
+            return new_val
+        side_min = self.app_config['limits']['side_min']
+        side_max = self.app_config['limits']['side_max']
         current = self.side_var.get()
-        new_val = clamp(current + delta, -40, 40)
+        new_val = clamp(current + delta, side_min, side_max)
         if new_val == current:
             return None
         self.side_var.set(new_val)
@@ -549,27 +726,29 @@ class FingerControl:
     
     def on_position_change(self, value):
         """Handle position slider change."""
+        if self._suppress_events:
+            return
         pos = int(float(value))
         self.pos_label.config(text=f"{pos}°")
-        self.update_callback(mimic_source=self if self.mimic_var.get() else None)
+        self._sync_raw_from_auto()
+        mimic = self if (self.mode_var.get() == 'auto' and self.mimic_var.get()) else None
+        self.update_callback(mimic_source=mimic)
     
     def on_side_change(self, value):
         """Handle side slider change."""
+        if self._suppress_events:
+            return
         side = int(float(value))
         self.side_label.config(text=f"{side}°")
-        self.update_callback()
+        self._sync_raw_from_auto()
+        mimic = self if (self.mode_var.get() == 'auto' and self.mimic_var.get()) else None
+        self.update_callback(mimic_source=mimic)
     
     def get_positions(self):
         """Get current positions for both servos."""
-        base_pos = self.pos_var.get()
-        side_offset = self.side_var.get()
-        
-        # Servo 1 gets base + side offset
-        # Servo 2 gets base - side offset (inverted because even ID)
-        pos1 = base_pos + side_offset
-        pos2 = base_pos - side_offset
-        
-        return pos1, pos2
+        if self.mode_var.get() == 'raw':
+            return self.raw_pos1_var.get(), self.raw_pos2_var.get()
+        return self._auto_positions()
     
     def get_speed(self):
         """Get current speed setting."""
@@ -577,14 +756,192 @@ class FingerControl:
     
     def set_positions(self, pos1, pos2):
         """Set slider positions from servo values."""
-        # Calculate base position and side offset
-        base_pos = (pos1 + pos2) // 2
-        side_offset = pos1 - base_pos
+        servo_min = self.app_config['limits']['servo_min']
+        servo_max = self.app_config['limits']['servo_max']
+        side_min = self.app_config['limits']['side_min']
+        side_max = self.app_config['limits']['side_max']
         
-        self.pos_var.set(base_pos)
-        self.side_var.set(side_offset)
-        self.pos_label.config(text=f"{base_pos}°")
-        self.side_label.config(text=f"{side_offset}°")
+        pos1 = clamp(int(pos1), servo_min, servo_max)
+        pos2 = clamp(int(pos2), servo_min, servo_max)
+        self._set_raw_values(pos1, pos2)
+        base_pos = (pos1 + pos2) // 2
+        side_offset = clamp(pos1 - base_pos, side_min, side_max)
+        self._set_auto_values(base_pos, side_offset)
+
+    def _auto_positions(self):
+        base_min = self.app_config['limits']['base_min']
+        base_max = self.app_config['limits']['base_max']
+        side_min = self.app_config['limits']['side_min']
+        side_max = self.app_config['limits']['side_max']
+        servo_min = self.app_config['limits']['servo_min']
+        servo_max = self.app_config['limits']['servo_max']
+        
+        base_pos = clamp(self.pos_var.get(), base_min, base_max)
+        side_offset = clamp(self.side_var.get(), side_min, side_max)
+        
+        # Interpolate between extreme poses from config
+        extremes = self.app_config['auto_extremes']
+        left_open = extremes['left_open']
+        right_open = extremes['right_open']
+        left_closed = extremes['left_closed']
+        right_closed = extremes['right_closed']
+        
+        # Normalize base_pos (0..1)
+        t = base_pos / base_max if base_max != 0 else 0.0
+        
+        if side_offset < 0:  # moving left
+            # lerp from center to left extreme
+            u = abs(side_offset) / abs(side_min) if side_min != 0 else 0.0
+            center = (base_pos, base_pos)
+            left_target = (
+                left_open[0] + t * (left_closed[0] - left_open[0]),
+                left_open[1] + t * (left_closed[1] - left_open[1])
+            )
+            pos1 = center[0] + u * (left_target[0] - center[0])
+            pos2 = center[1] + u * (left_target[1] - center[1])
+        elif side_offset > 0:  # moving right
+            # lerp from center to right extreme
+            u = side_offset / side_max if side_max != 0 else 0.0
+            center = (base_pos, base_pos)
+            right_target = (
+                right_open[0] + t * (right_closed[0] - right_open[0]),
+                right_open[1] + t * (right_closed[1] - right_open[1])
+            )
+            pos1 = center[0] + u * (right_target[0] - center[0])
+            pos2 = center[1] + u * (right_target[1] - center[1])
+        else:
+            pos1 = base_pos
+            pos2 = base_pos
+        
+        return clamp(int(pos1), servo_min, servo_max), clamp(int(pos2), servo_min, servo_max)
+
+    def _set_auto_values(self, base_pos, side_offset):
+        base_min = self.app_config['limits']['base_min']
+        base_max = self.app_config['limits']['base_max']
+        side_min = self.app_config['limits']['side_min']
+        side_max = self.app_config['limits']['side_max']
+        
+        self._suppress_events = True
+        try:
+            self.pos_var.set(clamp(base_pos, base_min, base_max))
+            self.side_var.set(clamp(side_offset, side_min, side_max))
+        finally:
+            self._suppress_events = False
+        self.pos_label.config(text=f"{self.pos_var.get()}°")
+        self.side_label.config(text=f"{self.side_var.get()}°")
+
+    def _set_raw_values(self, pos1, pos2):
+        servo_min = self.app_config['limits']['servo_min']
+        servo_max = self.app_config['limits']['servo_max']
+        
+        self._suppress_events = True
+        try:
+            self.raw_pos1_var.set(clamp(pos1, servo_min, servo_max))
+            self.raw_pos2_var.set(clamp(pos2, servo_min, servo_max))
+        finally:
+            self._suppress_events = False
+        self.raw_pos1_label.config(text=f"{self.raw_pos1_var.get()}°")
+        self.raw_pos2_label.config(text=f"{self.raw_pos2_var.get()}°")
+
+    def _sync_raw_from_auto(self):
+        pos1, pos2 = self._auto_positions()
+        self._set_raw_values(pos1, pos2)
+
+    def _sync_auto_from_raw(self):
+        servo_min = self.app_config['limits']['servo_min']
+        servo_max = self.app_config['limits']['servo_max']
+        side_min = self.app_config['limits']['side_min']
+        side_max = self.app_config['limits']['side_max']
+        
+        pos1 = clamp(self.raw_pos1_var.get(), servo_min, servo_max)
+        pos2 = clamp(self.raw_pos2_var.get(), servo_min, servo_max)
+        base_pos = (pos1 + pos2) // 2
+        side_offset = clamp(pos1 - base_pos, side_min, side_max)
+        self._set_auto_values(base_pos, side_offset)
+
+    def _on_raw_change(self, slider_idx, value):
+        if self._suppress_events:
+            return
+        val = int(float(value))
+        if slider_idx == 1:
+            self.raw_pos1_label.config(text=f"{val}°")
+        else:
+            self.raw_pos2_label.config(text=f"{val}°")
+        self._sync_auto_from_raw()
+        self.update_callback()
+
+    def _update_mode_visibility(self):
+        is_raw = self.mode_var.get() == 'raw'
+        if is_raw:
+            self.auto_frame.grid_remove()
+            self.raw_frame.grid()
+            self.center_btn.state(['disabled'])
+            self.mimic_var.set(False)
+            self.mimic_check.state(['disabled'])
+            self._set_raw_values(*self._auto_positions())
+        else:
+            self.raw_frame.grid_remove()
+            self.auto_frame.grid()
+            self.center_btn.state(['!disabled'])
+            self.mimic_check.state(['!disabled'])
+            self._sync_auto_from_raw()
+
+    def update_activity_state(self, is_moving=False, is_blocked=False):
+        if is_blocked:
+            self._set_led_mode('blocked')
+        elif is_moving:
+            self._set_led_mode('moving')
+        else:
+            self._set_led_mode('idle')
+
+    # --- LED helpers -----------------------------------------------------
+
+    def _resolve_background_color(self):
+        for widget in (self.frame, self.frame.master, self.frame.winfo_toplevel()):
+            if widget is None:
+                continue
+            try:
+                color = widget.cget('background')
+            except tk.TclError:
+                color = None
+            if color:
+                return color
+        return '#d9d9d9'
+
+    def _set_led_mode(self, mode):
+        if mode == getattr(self, '_led_mode', None):
+            return
+        self._led_mode = mode
+        if self._led_blink_job:
+            self.frame.after_cancel(self._led_blink_job)
+            self._led_blink_job = None
+        if mode == 'moving':
+            self._led_on = True
+            self._apply_led_color('#18d455')
+            self._schedule_led_blink()
+        elif mode == 'blocked':
+            self._apply_led_color('#d64242')
+        else:
+            self._apply_led_color('#5a5a5a')
+
+    def _schedule_led_blink(self):
+        self._led_blink_job = self.frame.after(350, self._toggle_led_blink)
+
+    def _toggle_led_blink(self):
+        if self._led_mode != 'moving':
+            self._led_blink_job = None
+            return
+        self._led_on = not self._led_on
+        color = '#18d455' if self._led_on else '#0b7f30'
+        self._apply_led_color(color)
+        self._led_blink_job = self.frame.after(350, self._toggle_led_blink)
+
+    def _apply_led_color(self, color):
+        if getattr(self, 'led_canvas', None) and getattr(self, 'led_indicator', None):
+            try:
+                self.led_canvas.itemconfig(self.led_indicator, fill=color)
+            except tk.TclError:
+                pass
 
 
 class AmazingHandGUI:
@@ -658,19 +1015,71 @@ class AmazingHandGUI:
             'target_pos': [[] for _ in range(8)],
             'current_pos': [[] for _ in range(8)],
             'load': [[] for _ in range(8)],
+            'speed': [[] for _ in range(8)],
             'temperature': [[] for _ in range(8)],
-            'voltage': [[] for _ in range(8)]
+            'voltage': [[] for _ in range(8)],
+            'moving': [[] for _ in range(8)]
         }
         self.start_time = time.time()
+        self.time_formatter = mdates.DateFormatter('%H:%M:%S')
         self.latest_actual_positions = None
         self.latest_actual_timestamp = 0.0
         self.actual_pos_lock = threading.Lock()
+        self.movement_poll_interval = 0.2  # Seconds between moving-flag checks
+        self.movement_timeout = 6.0  # Max seconds to wait before logging anyway
+        self._moving_flags_supported = True
+        self._moving_failure_count = 0
+        self._moving_use_sync = None
+        self._moving_sync_warning_logged = False
+        self.pose_log_counter = 0
+        self.scope_markers = []
+        self.scope_ax2 = None
+        self.chart_mode = tk.StringVar(value='Multi-Servo')
+        self.scope_servo_var = tk.StringVar(value='1')
+        self.latest_goal_positions = [0.0] * 8
+        self.feedback_lock = threading.Lock()
+        self.feedback_data = {
+            'position': [0.0] * 8,
+            'speed': [0.0] * 8,
+            'load': [0.0] * 8,
+            'voltage': [0.0] * 8,
+            'temperature': [0.0] * 8,
+            'current': [0.0] * 8,
+            'moving': [0] * 8,
+            'status': [0] * 8,
+            'goal': [0.0] * 8
+        }
+        self.feedback_update_pending = False
+        self.feedback_metric_specs = [
+            ('goal', 'Goal (°)', "Commanded target stored on the servo."),
+            ('position', 'Position (°)', "Latest measured position."),
+            ('speed', 'Speed (°/s)', "Measured rotational speed."),
+            ('load', 'Torque (%)', "Present load/torque reading (signed)."),
+            ('voltage', 'Voltage (V)', "Supply voltage at the servo."),
+            ('current', 'Current (mA)', "Estimated draw derived from load."),
+            ('temperature', 'Temperature (°C)', "Internal temperature sensor."),
+            ('status', 'Status', "Status register bitfield (hex)."),
+            ('moving', 'Moving', "Servo moving flag (Yes/No).")
+        ]
+        self.feedback_frame = None
+        self.feedback_cells = {}
+        self._feedback_styles_ready = False
+        self.blocked_error_threshold = 8.0  # Degrees difference signaling blockage
         
         # Sequence control flags
         self.stop_sequence = False
         self.pause_sequence = False
         self.sequence_running = False
         self.sequence_thread = None
+        self.chart_paused = False
+        self.chart_y_scale = 1.1
+        self.chart_y_offset = 0.0
+        self.chart_x_zoom = 1.0  # Fraction of available history displayed
+        self.chart_x_pan = 0.0   # 0=start, 1=end
+        self.y_zoom_var = tk.DoubleVar(value=self.chart_y_scale)
+        self.y_pan_var = tk.DoubleVar(value=self.chart_y_offset)
+        self.x_zoom_var = tk.DoubleVar(value=self.chart_x_zoom)
+        self.x_pan_var = tk.DoubleVar(value=self.chart_x_pan)
         
         # Keyboard control
         self.selected_finger_idx = 0  # Default to first finger
@@ -685,6 +1094,8 @@ class AmazingHandGUI:
         # Left panel - controls
         left_frame = ttk.Frame(paned, padding=10)
         paned.add(left_frame, weight=1)
+        for col in range(6):
+            left_frame.grid_columnconfigure(col, weight=1)
         
         # Right panel - charts
         right_frame = ttk.Frame(paned, padding=10)
@@ -698,8 +1109,14 @@ class AmazingHandGUI:
         
         # Create finger controls
         self.fingers = []
+        app_config = load_app_config()
         self.finger_names = ['Pointer finger', 'Middle finger', 'Ring finger', 'Thumb']
-        servo_pairs = [(1, 2), (3, 4), (5, 6), (7, 8)]
+        servo_pairs = [
+            app_config['servos']['pointer'],
+            app_config['servos']['middle'],
+            app_config['servos']['ring'],
+            app_config['servos']['thumb']
+        ]
         
         for idx, (name, (s1, s2)) in enumerate(zip(self.finger_names, servo_pairs)):
             if idx < 3:  # First row: fingers 1, 2, 3
@@ -717,16 +1134,16 @@ class AmazingHandGUI:
             finger.frame.grid(row=row, column=col, columnspan=2, padx=5, pady=5, sticky='n')
             self.fingers.append(finger)
 
-        # Right-side stacked controls next to thumb
+        # Right-side stacked controls next to thumb (span remaining columns)
         right_controls_frame = ttk.Frame(left_frame)
-        right_controls_frame.grid(row=2, column=2, columnspan=4, padx=(10, 0), pady=5, sticky='n')
+        right_controls_frame.grid(row=2, column=2, columnspan=4, padx=(10, 0), pady=5, sticky='nsew')
         
         # Connection options - top of right stack
         conn_frame = ttk.LabelFrame(right_controls_frame, text="Connection", padding=5)
-        conn_frame.pack(fill='x', pady=(0, 5))
+        conn_frame.pack(fill='x', expand=True, pady=(0, 5))
         
         conn_row = ttk.Frame(conn_frame)
-        conn_row.pack(fill='x')
+        conn_row.pack(fill='x', expand=True)
         
         ttk.Label(conn_row, text="Port:").pack(side='left', padx=(0,2))
         
@@ -750,9 +1167,11 @@ class AmazingHandGUI:
         
         ttk.Label(conn_row, text="Baud:").pack(side='left', padx=(5,2))
         self.baudrate_var = tk.StringVar(value=str(self.initial_baudrate))
+        app_config = load_app_config()
+        baudrate_options = [str(b) for b in app_config['serial']['baudrate_options']]
         baudrate_combo = ttk.Combobox(
             conn_row, textvariable=self.baudrate_var, 
-            values=['9600', '115200', '1000000'], width=8, state='readonly'
+            values=baudrate_options, width=8, state='readonly'
         )
         baudrate_combo.pack(side='left', padx=2)
         attach_tooltip(baudrate_combo, "Serial communication speed.")
@@ -772,7 +1191,7 @@ class AmazingHandGUI:
         
         # Global controls - second in right stack
         control_frame = ttk.LabelFrame(right_controls_frame, text="Global Controls", padding=10)
-        control_frame.pack(fill='x', pady=5)
+        control_frame.pack(fill='x', expand=True, pady=5)
         
         # Preset buttons
         self.open_all_btn = ttk.Button(
@@ -795,11 +1214,11 @@ class AmazingHandGUI:
         
         # Pose management section - middle of right stack
         pose_mgmt_frame = ttk.LabelFrame(right_controls_frame, text="Pose Management", padding=10)
-        pose_mgmt_frame.pack(fill='x', pady=5)
+        pose_mgmt_frame.pack(fill='x', expand=True, pady=5)
         
         # First row: existing poses
         pose_row1 = ttk.Frame(pose_mgmt_frame)
-        pose_row1.pack(fill='x', pady=2)
+        pose_row1.pack(fill='x', expand=True, pady=2)
         
         ttk.Label(pose_row1, text="Pose:").pack(side='left', padx=(0,2))
         poses_list = load_pose_definitions()
@@ -823,7 +1242,7 @@ class AmazingHandGUI:
         
         # Second row: add new pose
         pose_row2 = ttk.Frame(pose_mgmt_frame)
-        pose_row2.pack(fill='x', pady=2)
+        pose_row2.pack(fill='x', expand=True, pady=2)
         
         ttk.Label(pose_row2, text="Name:").pack(side='left', padx=(0,2))
         self.save_pose_name_var = tk.StringVar()
@@ -839,11 +1258,11 @@ class AmazingHandGUI:
        
         # Sequence player section - bottom of right stack
         seq_player_frame = ttk.LabelFrame(right_controls_frame, text="Sequence Player", padding=10)
-        seq_player_frame.pack(fill='x', pady=5)
+        seq_player_frame.pack(fill='x', expand=True, pady=5)
         
         # First row: sequence selection
         seq_row1 = ttk.Frame(seq_player_frame)
-        seq_row1.pack(fill='x', pady=2)
+        seq_row1.pack(fill='x', expand=True, pady=2)
         
         ttk.Label(seq_row1, text="Sequence:").pack(side='left', padx=(0,5))
         
@@ -870,7 +1289,7 @@ class AmazingHandGUI:
         
         # Second row: playback controls
         seq_row2 = ttk.Frame(seq_player_frame)
-        seq_row2.pack(fill='x', pady=2)
+        seq_row2.pack(fill='x', expand=True, pady=2)
         
         self.play_btn = ttk.Button(
             seq_row2, text="▶ Play", command=self.play_selected_sequence, width=10
@@ -949,52 +1368,98 @@ class AmazingHandGUI:
         )
         chart_title.pack(pady=(5,0))
         attach_tooltip(chart_title, "Live telemetry from all servos (position, load, temperature, voltage).")
-        
-        # Metric selection
+       
+        # Metric selection & chart controls
         select_frame = ttk.Frame(parent)
-        select_frame.pack(fill='x', padx=5, pady=(5,2))
+        select_frame.pack(fill='x', padx=1, pady=(5,2))
+
+        chart_controls_frame = ttk.Frame(select_frame)
+        chart_controls_frame.pack(side='left', padx=5)
         
+        self.chart_pause_btn = ttk.Button(chart_controls_frame, text="⏸ Pause Chart", command=self.toggle_chart_pause, width=14)
+        self.chart_pause_btn.pack(side='top', pady=1)
+        attach_tooltip(self.chart_pause_btn, "Stop refreshing the plot without affecting telemetry collection.")
+
         display_label = ttk.Label(select_frame, text="Display:")
         display_label.pack(side='left', padx=5)
-        attach_tooltip(display_label, "Pick which telemetry metric to plot.")
+        attach_tooltip(display_label, "Select which telemetry metrics to plot (multiple allowed).")
         
-        self.chart_metric = tk.StringVar(value='current_pos')
+        self.chart_metrics = {
+            'current_pos': tk.BooleanVar(value=True),
+            'target_vs_current': tk.BooleanVar(value=False),
+            'load': tk.BooleanVar(value=False),
+            'speed': tk.BooleanVar(value=False),
+            'temperature': tk.BooleanVar(value=False),
+            'voltage': tk.BooleanVar(value=False),
+            'moving': tk.BooleanVar(value=False)
+        }
+        
         metrics = [
             ('Position', 'current_pos'),
             ('Target vs Current', 'target_vs_current'),
-            ('Load/Force', 'load'),
+            ('Torque', 'load'),
+            ('Speed', 'speed'),
             ('Temperature', 'temperature'),
-            ('Voltage', 'voltage')
+            ('Voltage', 'voltage'),
+            ('Moving', 'moving')
         ]
         
         metric_tips = {
             'current_pos': "Plot servo position history in degrees.",
             'target_vs_current': "Overlay commanded target vs. measured position.",
-            'load': "Show load/force for each servo.",
+            'load': "Show load/force (torque %) for each servo.",
+            'speed': "Display servo speed feedback (deg/s).",
             'temperature': "Display internal temperature readings.",
-            'voltage': "Monitor supply voltage levels."
+            'voltage': "Monitor supply voltage levels.",
+            'moving': "Plot moving flags (1=moving, 0=idle) for each servo."
         }
         for label, value in metrics:
-            metric_btn = ttk.Radiobutton(
-                select_frame, text=label, value=value,
-                variable=self.chart_metric,
+            metric_check = ttk.Checkbutton(
+                select_frame, text=label,
+                variable=self.chart_metrics[value],
                 command=self.update_chart
             )
-            metric_btn.pack(side='left', padx=2)
-            attach_tooltip(metric_btn, metric_tips.get(value, ""))
+            metric_check.pack(side='left', padx=2)
+            attach_tooltip(metric_check, metric_tips.get(value, ""))
+
+        
+        # Chart mode and servo selection controls
+        mode_frame = ttk.Frame(parent)
+        mode_frame.pack(fill='x', padx=5, pady=(5,4))
+        ttk.Label(mode_frame, text="Chart Mode:").pack(side='left', padx=(0,4))
+        mode_combo = ttk.Combobox(
+            mode_frame,
+            textvariable=self.chart_mode,
+            values=['Multi-Servo', 'Scope'],
+            width=12,
+            state='readonly'
+        )
+        mode_combo.pack(side='left', padx=(0,8))
+        attach_tooltip(mode_combo, "Switch between multi-servo view and single-servo oscilloscope style view.")
+        mode_combo.bind('<<ComboboxSelected>>', lambda _e: self._on_chart_mode_change())
+        self.chart_mode.trace_add('write', lambda *_: self._on_chart_mode_change())
+        ttk.Label(mode_frame, text="Scope Servo:").pack(side='left', padx=(0,4))
+        scope_combo = ttk.Combobox(
+            mode_frame,
+            textvariable=self.scope_servo_var,
+            values=[str(i) for i in range(1, 9)],
+            width=4,
+            state='readonly'
+        )
+        scope_combo.pack(side='left', padx=(0,8))
+        attach_tooltip(scope_combo, "Servo channel used for scope view and feedback panel.")
+        scope_combo.bind('<<ComboboxSelected>>', lambda _e: self._on_scope_servo_change())
+        self.scope_servo_var.trace_add('write', lambda *_: self._on_scope_servo_change())
         
         # Servo selection
-        servo_frame = ttk.Frame(parent)
-        servo_frame.pack(fill='x', padx=5, pady=2)
-        
-        servos_label = ttk.Label(servo_frame, text="Servos:")
+        servos_label = ttk.Label(mode_frame, text="Servos:")
         servos_label.pack(side='left', padx=5)
         attach_tooltip(servos_label, "Toggle which servo traces are visible.")
         
         self.servo_visible = [tk.BooleanVar(value=True) for _ in range(8)]
         for i in range(8):
             servo_check = ttk.Checkbutton(
-                servo_frame, text=f"S{i+1}",
+                mode_frame, text=f"S{i+1}",
                 variable=self.servo_visible[i],
                 command=self.update_chart
             )
@@ -1002,17 +1467,17 @@ class AmazingHandGUI:
             attach_tooltip(servo_check, f"Show/hide servo {i+1} in the plot.")
         
         # Add select/deselect all buttons
-        all_btn = ttk.Button(servo_frame, text="✓ All", command=self.select_all_servos, width=6)
+        all_btn = ttk.Button(mode_frame, text="✓ All", command=self.select_all_servos, width=6)
         all_btn.pack(side='left', padx=5)
         attach_tooltip(all_btn, "Enable all servo traces.")
-        none_btn = ttk.Button(servo_frame, text="✕ None", command=self.deselect_all_servos, width=6)
+        none_btn = ttk.Button(mode_frame, text="✕ None", command=self.deselect_all_servos, width=6)
         none_btn.pack(side='left', padx=2)
         attach_tooltip(none_btn, "Hide all servo traces (useful before selecting a subset).")
         
         # Rolling chart option
         self.rolling_var = tk.BooleanVar(value=True)
         rolling_check = ttk.Checkbutton(
-            servo_frame, text="Rolling",
+            mode_frame, text="Rolling",
             variable=self.rolling_var,
             command=self.toggle_rolling
         )
@@ -1020,22 +1485,363 @@ class AmazingHandGUI:
         attach_tooltip(rolling_check, "Limit chart to latest samples instead of growing indefinitely.")
         
         # Clear chart button
-        clear_btn = ttk.Button(servo_frame, text="⌫ Clear", command=self.clear_chart_data, width=6)
+        clear_btn = ttk.Button(mode_frame, text="⌫ Clear", command=self.clear_chart_data, width=6)
         clear_btn.pack(side='left', padx=2)
         attach_tooltip(clear_btn, "Reset collected telemetry and start fresh.")
         
+        # Chart and slider layout container
+        chart_container = ttk.Frame(parent)
+        chart_container.pack(fill='both', expand=True, padx=5, pady=(0,5))
+        
+        # Right side - Y axis sliders (vertical, 100% height)
+        y_sliders_frame = ttk.Frame(chart_container, width=30)
+        y_sliders_frame.pack(side='right', fill='y', padx=(5,0))
+        y_sliders_frame.pack_propagate(False)
+        
+        # Y Zoom slider (top half)
+        y_zoom_container = ttk.Frame(y_sliders_frame)
+        y_zoom_container.pack(fill='both', expand=True, pady=(0,3))
+        
+        ttk.Label(y_zoom_container, text="Y\nZoom").pack(anchor='center')
+        self.y_zoom_slider = ttk.Scale(
+            y_zoom_container, from_=5.0, to=0.2, orient='vertical',
+            variable=self.y_zoom_var, command=self._on_y_zoom_slider
+        )
+        self.y_zoom_slider.pack(fill='both', expand=True, pady=1, padx=2)
+        self.y_zoom_value_label = ttk.Label(y_zoom_container, text=f"{self.chart_y_scale:.2f}×")
+        self.y_zoom_value_label.pack(anchor='center')
+        attach_tooltip(self.y_zoom_slider, "Slide to zoom the Y axis in/out.")
+        
+        # Y Pan slider (bottom half)
+        y_pan_container = ttk.Frame(y_sliders_frame)
+        y_pan_container.pack(fill='both', expand=True, pady=(3,0))
+        
+        ttk.Label(y_pan_container, text="Y\nPan").pack(anchor='center')
+        self.y_pan_slider = ttk.Scale(
+            y_pan_container, from_=3.0, to=-3.0, orient='vertical',
+            variable=self.y_pan_var, command=self._on_y_pan_slider
+        )
+        self.y_pan_slider.pack(fill='both', expand=True, pady=1, padx=2)
+        self.y_pan_value_label = ttk.Label(y_pan_container, text=f"{self.chart_y_offset:.2f}")
+        self.y_pan_value_label.pack(anchor='center')
+        attach_tooltip(self.y_pan_slider, "Shift the Y axis window up or down.")
+        
+        # Left side - chart and time sliders
+        chart_and_time_frame = ttk.Frame(chart_container)
+        chart_and_time_frame.pack(side='left', fill='both', expand=True)
+        
+        # Chart area
+        chart_plot_frame = ttk.Frame(chart_and_time_frame)
+        chart_plot_frame.pack(fill='both', expand=True)
+        self._sync_chart_control_vars()
+        
         # Create matplotlib figure
         self.fig = Figure(figsize=(10, 6), dpi=100)
-        self.fig.tight_layout(pad=0.5)
         self.ax = self.fig.add_subplot(111)
+        self.fig.subplots_adjust(top=0.96, bottom=0.14, left=0.08, right=0.98)
+        self.ax.xaxis.set_major_formatter(self.time_formatter)
+        self.ax.tick_params(axis='x', labelrotation=15)
+        self.ax.xaxis_date()
         
-        self.canvas = FigureCanvasTkAgg(self.fig, parent)
+        self.canvas = FigureCanvasTkAgg(self.fig, chart_plot_frame)
         canvas_widget = self.canvas.get_tk_widget()
-        canvas_widget.pack(fill='both', expand=True, padx=2, pady=2)
+        canvas_widget.pack(fill='both', expand=True)
         attach_tooltip(canvas_widget, "Scroll to zoom, drag to pan; updates roughly every second.")
         
+        # Time sliders below chart (100% width)
+        time_sliders_frame = ttk.Frame(chart_and_time_frame)
+        time_sliders_frame.pack(fill='x', pady=(5,0))
+        
+        # Time Zoom slider
+        time_zoom_frame = ttk.Frame(time_sliders_frame)
+        time_zoom_frame.pack(side='left', padx=10, expand=True, fill='x')
+        ttk.Label(time_zoom_frame, text="Time Zoom").pack(side='left', padx=2)
+        self.x_zoom_slider = ttk.Scale(
+            time_zoom_frame, from_=1.0, to=0.1, orient='horizontal',
+            variable=self.x_zoom_var, command=self._on_x_zoom_slider
+        )
+        self.x_zoom_slider.pack(side='left', padx=2, fill='x', expand=True)
+        self.x_zoom_value_label = ttk.Label(time_zoom_frame, text="100%", width=5)
+        self.x_zoom_value_label.pack(side='left')
+        attach_tooltip(self.x_zoom_slider, "Zoom horizontally to focus on recent telemetry.")
+        
+        # Time Pan slider
+        time_pan_frame = ttk.Frame(time_sliders_frame)
+        time_pan_frame.pack(side='left', padx=10, expand=True, fill='x')
+        ttk.Label(time_pan_frame, text="Time Pan").pack(side='left', padx=2)
+        self.x_pan_slider = ttk.Scale(
+            time_pan_frame, from_=0.0, to=1.0, orient='horizontal',
+            variable=self.x_pan_var, command=self._on_x_pan_slider
+        )
+        self.x_pan_slider.pack(side='left', padx=2, fill='x', expand=True)
+        self.x_pan_value_label = ttk.Label(time_pan_frame, text="0%", width=5)
+        self.x_pan_value_label.pack(side='left')
+        attach_tooltip(self.x_pan_slider, "Pan the horizontal window through recorded data.")
+        
+        # Servo feedback panel (scope-style readouts)
+        self._build_feedback_panel(parent)
+
         # Initialize plot
         self.update_chart()
+        self.update_feedback_panel()
+
+    def _ensure_feedback_styles(self):
+        """Create ttk styles used by the feedback grid once."""
+        if self._feedback_styles_ready:
+            return
+        style = ttk.Style(self.root)
+        style.configure(
+            'Feedback.Header.TLabel',
+            background='#f2f2f2',
+            font=('TkDefaultFont', 9, 'bold')
+        )
+        style.configure(
+            'Feedback.Metric.TLabel',
+            background='#fafafa',
+            font=('TkDefaultFont', 9, 'bold')
+        )
+        style.configure(
+            'Feedback.Cell.TLabel',
+            background='#ffffff',
+            font=('TkDefaultFont', 9)
+        )
+        self._feedback_styles_ready = True
+
+    def _build_feedback_panel(self, parent):
+        """Create the servo feedback panel shown under the chart."""
+        if self.feedback_frame is not None:
+            try:
+                self.feedback_frame.destroy()
+            except Exception:
+                pass
+        self.feedback_frame = ttk.LabelFrame(parent, text="Servo Feedback", padding=6)
+        self.feedback_frame.pack(fill='both', padx=5, pady=(0, 5), expand=True)
+
+        header = ttk.Label(
+            self.feedback_frame,
+            text="Servo Feedback (All Servos)",
+            font=('Arial', 11, 'bold')
+        )
+        header.pack(anchor='w', pady=(0, 4))
+        attach_tooltip(header, "Live telemetry table with servos on columns and metrics on rows.")
+
+        self._ensure_feedback_styles()
+        self.feedback_cells = {}
+
+        grid_frame = ttk.Frame(self.feedback_frame)
+        grid_frame.pack(fill='both', expand=True)
+
+        headings = ['Metric'] + [f'S{i}' for i in range(1, 9)]
+        for col_index, heading in enumerate(headings):
+            lbl = ttk.Label(
+                grid_frame, text=heading,
+                style='Feedback.Header.TLabel',
+                relief='solid', borderwidth=1,
+                padding=(6, 4), anchor='center'
+            )
+            lbl.grid(row=0, column=col_index, sticky='nsew')
+            attach_tooltip(lbl, f"Column heading: {heading}")
+            grid_frame.columnconfigure(col_index, weight=1)
+        grid_frame.rowconfigure(0, weight=0)
+
+        for row_idx, (key, label, tip) in enumerate(self.feedback_metric_specs, start=1):
+            row_label = ttk.Label(
+                grid_frame, text=label,
+                style='Feedback.Metric.TLabel',
+                relief='solid', borderwidth=1,
+                padding=(6, 4), anchor='w'
+            )
+            row_label.grid(row=row_idx, column=0, sticky='nsew')
+            attach_tooltip(row_label, tip)
+            grid_frame.rowconfigure(row_idx, weight=1)
+
+            for col in range(1, len(headings)):
+                cell = ttk.Label(
+                    grid_frame, text='—',
+                    style='Feedback.Cell.TLabel',
+                    relief='solid', borderwidth=1,
+                    padding=(4, 2), anchor='center'
+                )
+                cell.grid(row=row_idx, column=col, sticky='nsew')
+                self.feedback_cells[(key, col-1)] = cell
+                attach_tooltip(cell, f"{label}: Servo S{col}")
+
+    def _request_feedback_refresh(self):
+        """Schedule a UI refresh for the feedback panel (thread-safe)."""
+        if self.feedback_update_pending:
+            return
+        self.feedback_update_pending = True
+        self.root.after(0, self._apply_feedback_refresh)
+
+    def _apply_feedback_refresh(self):
+        """Execute the pending feedback refresh on the Tk thread."""
+        self.feedback_update_pending = False
+        self.update_feedback_panel()
+
+    def _on_chart_mode_change(self):
+        """Handle chart mode combo box changes."""
+        mode = self.chart_mode.get()
+        self.status_var.set(f"Chart mode: {mode}")
+        self.update_chart()
+
+    def _on_scope_servo_change(self):
+        """Respond when the user picks a different servo for scope/feedback."""
+        value = self.scope_servo_var.get()
+        try:
+            servo = int(value)
+        except (TypeError, ValueError):
+            servo = 1
+        servo = int(clamp(servo, 1, 8))
+        if value != str(servo):
+            self.scope_servo_var.set(str(servo))
+            return
+        self.status_var.set(f"Scope servo: S{servo}")
+        self.update_chart()
+        self.update_feedback_panel()
+
+    def update_feedback_panel(self):
+        """Update the servo feedback table."""
+        if not self.feedback_cells:
+            return
+
+        data_snapshot = {}
+        with self.feedback_lock:
+            for key, _label, _tip in self.feedback_metric_specs:
+                raw = self.feedback_data.get(key, [])
+                if len(raw) < 8:
+                    padded = list(raw) + [None] * (8 - len(raw))
+                else:
+                    padded = list(raw[:8])
+                data_snapshot[key] = padded
+
+        self._update_feedback_table(data_snapshot)
+        self._update_finger_activity_indicators(data_snapshot)
+
+    def _update_feedback_table(self, data_snapshot):
+        """Refresh the rotated telemetry table (metrics as rows)."""
+        if not self.feedback_cells:
+            return
+
+        for key, label, _tip in self.feedback_metric_specs:
+            metric_values = data_snapshot.get(key, [None] * 8)
+            if len(metric_values) < 8:
+                metric_values = list(metric_values) + [None] * (8 - len(metric_values))
+            for idx in range(8):
+                cell = self.feedback_cells.get((key, idx))
+                if not cell:
+                    continue
+                cell.config(text=self._format_feedback_value(key, metric_values[idx]))
+
+    def _update_finger_activity_indicators(self, data_snapshot):
+        if not self.fingers:
+            return
+
+        moving_values = data_snapshot.get('moving', [])
+        goal_values = data_snapshot.get('goal', [])
+        position_values = data_snapshot.get('position', [])
+        threshold = self.blocked_error_threshold
+
+        def _value(values, idx):
+            if not isinstance(values, list):
+                return None
+            if idx < 0 or idx >= len(values):
+                return None
+            return values[idx]
+
+        for finger_idx, finger in enumerate(self.fingers):
+            servo_indices = [finger_idx * 2, finger_idx * 2 + 1]
+            is_moving = False
+            blocked_candidate = False
+            for servo_idx in servo_indices:
+                moving_flag = _value(moving_values, servo_idx)
+                if moving_flag:
+                    is_moving = True
+                goal = _value(goal_values, servo_idx)
+                pos = _value(position_values, servo_idx)
+                if goal is None or pos is None:
+                    continue
+                try:
+                    if abs(float(goal) - float(pos)) >= threshold:
+                        blocked_candidate = True
+                except (TypeError, ValueError):
+                    continue
+            is_blocked = blocked_candidate and not is_moving
+            finger.update_activity_state(is_moving, is_blocked)
+
+    def _format_feedback_value(self, key, value):
+        """Convert raw feedback values into user-friendly strings."""
+        if value is None:
+            return '—'
+
+        if key in ('goal', 'position'):
+            return f"{float(value):.2f}°"
+        if key == 'speed':
+            return f"{float(value):.1f}°/s"
+        if key == 'voltage':
+            return f"{float(value):.2f} V"
+        if key == 'temperature':
+            return f"{float(value):.1f} °C"
+        if key == 'current':
+            return f"{float(value):.0f} mA"
+        if key == 'load':
+            return f"{self._load_to_percent(value):.1f} %"
+        if key == 'status':
+            return f"0x{int(value) & 0xFF:02X}"
+        if key == 'moving':
+            return "Yes" if bool(value) else "No"
+        return str(value)
+
+    def _load_to_percent(self, load_value):
+        """Convert the present-load reading into a percentage."""
+        try:
+            load_float = float(load_value)
+        except (TypeError, ValueError):
+            return 0.0
+        magnitude = abs(load_float)
+        if magnitude <= 1.5:
+            percent = magnitude * 100.0
+        else:
+            percent = magnitude / 10.23
+        percent = clamp(percent, 0.0, 150.0)
+        return percent if load_float >= 0 else -percent
+
+    def _estimate_current_from_load(self, load_value):
+        """Rudimentary current estimate derived from torque percentage."""
+        percent = abs(self._load_to_percent(load_value))
+        if percent <= 0.1:
+            return 0.0
+        # Assume roughly 1.2 A at 100% load; scale proportionally
+        estimated_ma = clamp(percent / 100.0 * 1200.0, 0.0, 1500.0)
+        return round(estimated_ma, 1)
+
+    def _coerce_numeric(self, value, default=0.0):
+        """Convert controller return types (arrays, lists) to floats."""
+        if value is None:
+            return default
+        if isinstance(value, np.ndarray):
+            try:
+                return float(value.item())
+            except Exception:
+                data = value.tolist()
+                return self._coerce_numeric(data[0], default) if data else default
+        if isinstance(value, (list, tuple)):
+            return self._coerce_numeric(value[0] if value else default, default)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _coerce_angle_degrees(self, value, servo_id, default=0.0):
+        """Convert a radian-based controller reading into GUI degrees."""
+        radians = self._coerce_numeric(value, default)
+        degrees = float(np.rad2deg(radians))
+        if servo_id % 2 == 0:
+            degrees = -degrees
+        return degrees
+
+    def _coerce_bool(self, value):
+        """Coerce controller return types to boolean flags."""
+        return bool(int(self._coerce_numeric(value, 0.0)))
     
     def monitor_servos(self):
         """Background thread to monitor servo states."""
@@ -1053,48 +1859,21 @@ class AmazingHandGUI:
                     idx = servo_id - 1
                     
                     try:
-                        # Read position
-                        current_pos_rad = self.controller.read_present_position(servo_id)
-                        if isinstance(current_pos_rad, (np.ndarray, list)):
-                            if isinstance(current_pos_rad, np.ndarray):
-                                current_pos_rad = current_pos_rad.item()
-                            else:
-                                current_pos_rad = current_pos_rad[0] if current_pos_rad else 0
-                        current_pos = float(np.rad2deg(current_pos_rad))
-                        if servo_id % 2 == 0:
-                            current_pos = -current_pos
+                        # Present position
+                        current_pos = self._coerce_angle_degrees(
+                            self.controller.read_present_position(servo_id),
+                            servo_id
+                        )
+                        precise_pos = round(float(current_pos), 2)
                         with self.actual_pos_lock:
                             if self.latest_actual_positions is None:
-                                self.latest_actual_positions = [0] * 8
-                            self.latest_actual_positions[idx] = int(round(current_pos))
+                                self.latest_actual_positions = [0.0] * 8
+                            self.latest_actual_positions[idx] = precise_pos
                             self.latest_actual_timestamp = time.time()
                         
-                        # Read load (force)
-                        load = self.controller.read_present_load(servo_id)
-                        if isinstance(load, (np.ndarray, list)):
-                            if isinstance(load, np.ndarray):
-                                load = load.item()
-                            else:
-                                load = load[0] if load else 0
-                        load = float(load)
-                        
-                        # Read temperature
-                        temp = self.controller.read_present_temperature(servo_id)
-                        if isinstance(temp, (np.ndarray, list)):
-                            if isinstance(temp, np.ndarray):
-                                temp = temp.item()
-                            else:
-                                temp = temp[0] if temp else 0
-                        temp = float(temp)
-                        
-                        # Read voltage
-                        voltage = self.controller.read_present_voltage(servo_id)
-                        if isinstance(voltage, (np.ndarray, list)):
-                            if isinstance(voltage, np.ndarray):
-                                voltage = voltage.item()
-                            else:
-                                voltage = voltage[0] if voltage else 0
-                        voltage = float(voltage)
+                        load = self._coerce_numeric(self.controller.read_present_load(servo_id), 0.0)
+                        temp = self._coerce_numeric(self.controller.read_present_temperature(servo_id), 0.0)
+                        voltage = self._coerce_numeric(self.controller.read_present_voltage(servo_id), 0.0)
                         
                         # Get target position from finger controls
                         finger_idx = idx // 2
@@ -1104,13 +1883,56 @@ class AmazingHandGUI:
                             target = pos1 if servo_in_finger == 0 else pos2
                         else:
                             target = 0
+                        goal_value = target
+                        try:
+                            goal_value = self._coerce_angle_degrees(
+                                self.controller.read_goal_position(servo_id),
+                                servo_id
+                            )
+                        except Exception:
+                            goal_value = target
+
+                        speed_value = 0.0
+                        try:
+                            speed_value = self._coerce_angle_degrees(
+                                self.controller.read_present_speed(servo_id),
+                                servo_id
+                            )
+                        except Exception:
+                            pass
+
+                        status_word = 0
+                        try:
+                            status_word = int(self._coerce_numeric(self.controller.read_status(servo_id), 0.0))
+                        except Exception:
+                            pass
+
+                        moving_flag = False
+                        try:
+                            moving_flag = self._coerce_bool(self.controller.read_moving(servo_id))
+                        except Exception:
+                            pass
                         
                         # Store data
                         self.servo_data['current_pos'][idx].append(current_pos)
                         self.servo_data['load'][idx].append(load)
                         self.servo_data['temperature'][idx].append(temp)
                         self.servo_data['voltage'][idx].append(voltage)
-                        self.servo_data['target_pos'][idx].append(target)
+                        self.servo_data['target_pos'][idx].append(goal_value)
+                        self.servo_data['speed'][idx].append(speed_value)
+                        self.servo_data['moving'][idx].append(1 if moving_flag else 0)
+
+                        with self.feedback_lock:
+                            self.feedback_data['position'][idx] = precise_pos
+                            self.feedback_data['speed'][idx] = round(float(speed_value), 2)
+                            self.feedback_data['load'][idx] = load
+                            self.feedback_data['voltage'][idx] = voltage
+                            self.feedback_data['temperature'][idx] = temp
+                            self.feedback_data['moving'][idx] = 1 if moving_flag else 0
+                            self.feedback_data['status'][idx] = status_word
+                            self.feedback_data['goal'][idx] = goal_value
+                            self.feedback_data['current'][idx] = self._estimate_current_from_load(load)
+                            self.latest_goal_positions[idx] = goal_value
                         
                         success = True
                         
@@ -1128,14 +1950,16 @@ class AmazingHandGUI:
                 # Only add time point if at least one servo succeeded
                 if success:
                     self.time_data.append(current_time)
+                    self._request_feedback_refresh()
                     
                     # Keep only recent data if rolling mode is enabled
                     if self.rolling_chart and len(self.time_data) > self.max_data_points:
-                        self.time_data.pop(0)
+                        points_to_remove = len(self.time_data) - self.max_data_points
+                        self.time_data = self.time_data[points_to_remove:]
                         for key in self.servo_data:
                             for idx in range(8):
-                                if len(self.servo_data[key][idx]) > 0:
-                                    self.servo_data[key][idx].pop(0)
+                                if len(self.servo_data[key][idx]) > points_to_remove:
+                                    self.servo_data[key][idx] = self.servo_data[key][idx][points_to_remove:]
                 
                 # Update chart every 10 readings
                 if len(self.time_data) % 10 == 0:
@@ -1215,13 +2039,136 @@ class AmazingHandGUI:
             self.log(f"Disconnect error: {e}")
             self.status_var.set(f"Disconnect error: {e}")
     
+    def _time_slice_to_axis(self, time_slice):
+        """Convert relative time values to matplotlib date numbers."""
+        if not time_slice:
+            return []
+        absolute = [datetime.fromtimestamp(self.start_time + t) for t in time_slice]
+        return mdates.date2num(absolute)
+
+    def _apply_chart_limits(self, values):
+        """Apply custom zoom/offset to Y-axis based on plotted values."""
+        finite_values = [float(v) for v in values if isinstance(v, (int, float)) and np.isfinite(v)]
+        if not finite_values:
+            return
+
+        ymin = min(finite_values)
+        ymax = max(finite_values)
+        if abs(ymax - ymin) < 1e-6:
+            margin = max(1.0, abs(ymin) * 0.1 + 1.0)
+            ymin -= margin
+            ymax += margin
+
+        span = ymax - ymin
+        center = (ymax + ymin) / 2.0
+        offset = self.chart_y_offset * span
+        half_span = max(span / 2.0 * self.chart_y_scale, 0.1)
+        self.ax.set_ylim(center - half_span + offset, center + half_span + offset)
+
+    def _get_time_window_indices(self):
+        total = len(self.time_data)
+        if total == 0:
+            return 0, 0
+        window_fraction = clamp(self.chart_x_zoom, 0.05, 1.0)
+        window_size = max(2, int(total * window_fraction))
+        window_size = min(window_size, total)
+        max_start = total - window_size
+        start = 0
+        if max_start > 0:
+            start = int(round(clamp(self.chart_x_pan, 0.0, 1.0) * max_start))
+        end = start + window_size
+        return start, end
+
+    def _on_y_zoom_slider(self, value):
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return
+        self.chart_y_scale = clamp(val, 0.2, 5.0)
+        if hasattr(self, 'y_zoom_value_label'):
+            self.y_zoom_value_label.config(text=f"{self.chart_y_scale:.2f}×")
+        self.status_var.set(f"Chart zoom: {self.chart_y_scale:.2f}×")
+        self.update_chart()
+
+    def _on_y_pan_slider(self, value):
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return
+        self.chart_y_offset = clamp(val, -3.0, 3.0)
+        if hasattr(self, 'y_pan_value_label'):
+            self.y_pan_value_label.config(text=f"{self.chart_y_offset:.2f}")
+        self.update_chart()
+
+    def _on_x_zoom_slider(self, value):
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return
+        self.chart_x_zoom = clamp(val, 0.1, 1.0)
+        if hasattr(self, 'x_zoom_value_label'):
+            self.x_zoom_value_label.config(text=f"{self.chart_x_zoom*100:.0f}%")
+        self.update_chart()
+
+    def _on_x_pan_slider(self, value):
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return
+        self.chart_x_pan = clamp(val, 0.0, 1.0)
+        if hasattr(self, 'x_pan_value_label'):
+            self.x_pan_value_label.config(text=f"{self.chart_x_pan*100:.0f}%")
+        self.update_chart()
+
+    def _sync_chart_control_vars(self):
+        if hasattr(self, 'y_zoom_var'):
+            self.y_zoom_var.set(self.chart_y_scale)
+        if hasattr(self, 'y_zoom_value_label'):
+            self.y_zoom_value_label.config(text=f"{self.chart_y_scale:.2f}×")
+        if hasattr(self, 'y_pan_var'):
+            self.y_pan_var.set(self.chart_y_offset)
+        if hasattr(self, 'y_pan_value_label'):
+            self.y_pan_value_label.config(text=f"{self.chart_y_offset:.2f}")
+        if hasattr(self, 'x_zoom_var'):
+            self.x_zoom_var.set(self.chart_x_zoom)
+        if hasattr(self, 'x_zoom_value_label'):
+            self.x_zoom_value_label.config(text=f"{self.chart_x_zoom*100:.0f}%")
+        if hasattr(self, 'x_pan_var'):
+            self.x_pan_var.set(self.chart_x_pan)
+        if hasattr(self, 'x_pan_value_label'):
+            self.x_pan_value_label.config(text=f"{self.chart_x_pan*100:.0f}%")
+
+    def toggle_chart_pause(self):
+        """Toggle chart rendering without stopping telemetry collection."""
+        self.chart_paused = not self.chart_paused
+        if self.chart_paused:
+            self.chart_pause_btn.config(text="▶ Resume Chart")
+            self.status_var.set("Chart updates paused")
+        else:
+            self.chart_pause_btn.config(text="⏸ Pause Chart")
+            self.status_var.set("Chart updates resumed")
+            self.update_chart()
+
     def update_chart(self):
         """Update the chart display."""
         try:
-            self.ax.clear()
+            if self.chart_paused:
+                return
             
-            metric = self.chart_metric.get()
+            self.ax.clear()
+            self.ax.xaxis.set_major_formatter(self.time_formatter)
+            self.ax.tick_params(axis='x', labelrotation=15)
+            
+            # Get list of selected metrics
+            selected_metrics = [key for key, var in self.chart_metrics.items() if var.get()]
+            if not selected_metrics:
+                self.ax.text(0.5, 0.5, 'No metrics selected',
+                           ha='center', va='center', transform=self.ax.transAxes)
+                self.canvas.draw()
+                return
+            
             colors = plt.cm.tab10(np.linspace(0, 1, 8))
+            plotted_values = []
             
             # Check if we have any data
             if len(self.time_data) == 0:
@@ -1229,63 +2176,121 @@ class AmazingHandGUI:
                            ha='center', va='center', transform=self.ax.transAxes)
                 self.canvas.draw()
                 return
+
+            start_idx, end_idx = self._get_time_window_indices()
+            if end_idx - start_idx < 2:
+                start_idx = max(0, len(self.time_data) - 2)
+                end_idx = len(self.time_data)
+            time_slice = self.time_data[start_idx:end_idx]
+            if len(time_slice) == 0:
+                self.ax.text(0.5, 0.5, 'Waiting for data...', 
+                           ha='center', va='center', transform=self.ax.transAxes)
+                self.canvas.draw()
+                return
+            base_plot_times = self._time_slice_to_axis(time_slice)
+            def _plot_times_for_length(count):
+                if count == len(time_slice):
+                    return base_plot_times
+                if count <= 0:
+                    return []
+                subset = time_slice[-count:]
+                return self._time_slice_to_axis(subset)
             
-            if metric == 'target_vs_current':
-                # Show target and current for visible servos
-                for i in range(8):
-                    if not self.servo_visible[i].get():
-                        continue
-                    if len(self.servo_data['current_pos'][i]) == 0:
-                        continue
-                    
-                    # Use the minimum length to avoid index errors
-                    data_len = min(len(self.time_data), len(self.servo_data['current_pos'][i]))
-                    if data_len == 0:
-                        continue
-                    
-                    time_slice = self.time_data[-data_len:]
-                    current_slice = self.servo_data['current_pos'][i][-data_len:]
-                    target_slice = self.servo_data['target_pos'][i][-data_len:]
-                    
-                    self.ax.plot(time_slice, current_slice, 
-                               label=f'S{i+1} Current', color=colors[i], linestyle='-')
-                    self.ax.plot(time_slice, target_slice,
-                               label=f'S{i+1} Target', color=colors[i], linestyle='--', alpha=0.5)
+            # Process each selected metric
+            for metric in selected_metrics:
+                if metric == 'target_vs_current':
+                    # Show target and current for visible servos
+                    for i in range(8):
+                        if not self.servo_visible[i].get():
+                            continue
+                        if len(self.servo_data['current_pos'][i]) == 0:
+                            continue
+                        
+                        if len(self.servo_data['current_pos'][i]) < end_idx:
+                            continue
+                        if len(self.servo_data['target_pos'][i]) < end_idx:
+                            continue
+                        current_slice = self.servo_data['current_pos'][i][start_idx:end_idx]
+                        target_slice = self.servo_data['target_pos'][i][start_idx:end_idx]
+                        if len(current_slice) == 0:
+                            continue
+                        plot_times = _plot_times_for_length(len(current_slice))
+                        plotted_values.extend(current_slice)
+                        plotted_values.extend(target_slice)
+                        
+                        self.ax.plot(plot_times, current_slice, 
+                                   label=f'S{i+1} Current', color=colors[i], linestyle='-')
+                        self.ax.plot(plot_times, target_slice,
+                                   label=f'S{i+1} Target', color=colors[i], linestyle='--', alpha=0.5)
                 
-                self.ax.set_ylabel('Position (degrees)')
-                self.ax.set_title('Target vs Current Position')
+                else:
+                    # Show single metric for visible servos
+                    data_key = metric
+                    labels = {
+                        'current_pos': 'Position (degrees)',
+                        'load': 'Load / Torque (%)',
+                        'speed': 'Speed (°/s)',
+                        'temperature': 'Temperature (°C)',
+                        'voltage': 'Voltage (V)',
+                        'moving': 'Moving Flag (0/1)'
+                    }
+                    
+                    for i in range(8):
+                        if not self.servo_visible[i].get():
+                            continue
+                        if len(self.servo_data[data_key][i]) == 0:
+                            continue
+                        
+                        if len(self.servo_data[data_key][i]) < end_idx:
+                            continue
+                        data_slice = self.servo_data[data_key][i][start_idx:end_idx]
+                        if len(data_slice) == 0:
+                            continue
+                        plot_times = _plot_times_for_length(len(data_slice))
+                        plotted_values.extend(data_slice)
+                        
+                        # Build label with metric info if multiple metrics selected
+                        if len(selected_metrics) > 1:
+                            label_prefix = labels.get(data_key, data_key).split('(')[0].strip()[:4]
+                            servo_label = f'{label_prefix} S{i+1}'
+                        else:
+                            servo_label = f'Servo {i+1}'
+                        
+                        if data_key == 'moving':
+                            self.ax.step(plot_times, data_slice,
+                                         where='post', label=servo_label, color=colors[i])
+                        else:
+                            self.ax.plot(plot_times, data_slice,
+                                       label=servo_label, color=colors[i])
             
-            else:
-                # Show single metric for visible servos
-                data_key = metric
-                labels = {
+            # Set labels based on selected metrics
+            if len(selected_metrics) == 1:
+                metric = selected_metrics[0]
+                labels_map = {
                     'current_pos': 'Position (degrees)',
-                    'load': 'Load/Force',
+                    'target_vs_current': 'Position (degrees)',
+                    'load': 'Load / Torque (%)',
+                    'speed': 'Speed (°/s)',
                     'temperature': 'Temperature (°C)',
-                    'voltage': 'Voltage (V)'
+                    'voltage': 'Voltage (V)',
+                    'moving': 'Moving Flag (0/1)'
                 }
-                
-                for i in range(8):
-                    if not self.servo_visible[i].get():
-                        continue
-                    if len(self.servo_data[data_key][i]) == 0:
-                        continue
-                    
-                    # Use the minimum length to avoid index errors
-                    data_len = min(len(self.time_data), len(self.servo_data[data_key][i]))
-                    if data_len == 0:
-                        continue
-                    
-                    time_slice = self.time_data[-data_len:]
-                    data_slice = self.servo_data[data_key][i][-data_len:]
-                    
-                    self.ax.plot(time_slice, data_slice,
-                               label=f'Servo {i+1}', color=colors[i])
-                
-                self.ax.set_ylabel(labels.get(data_key, data_key))
-                self.ax.set_title(labels.get(data_key, data_key))
+                self.ax.set_ylabel(labels_map.get(metric, metric))
+                title_map = {
+                    'target_vs_current': 'Target vs Current Position'
+                }
+                self.ax.set_title(title_map.get(metric, labels_map.get(metric, metric)))
+            else:
+                self.ax.set_ylabel('Multiple Metrics')
+                self.ax.set_title('Multi-Metric View')
             
-            self.ax.set_xlabel('Time (seconds)')
+            if 'moving' in selected_metrics and len(selected_metrics) == 1:
+                self.ax.set_ylim(-0.2, 1.2)
+            else:
+                self._apply_chart_limits(plotted_values)
+            
+            # Remove X margins, add Y margins
+            self.ax.margins(x=0, y=0.1)
             
             # Only add legend if there are labeled lines
             if self.ax.get_legend_handles_labels()[0]:
@@ -1324,6 +2329,11 @@ class AmazingHandGUI:
             for idx in range(8):
                 self.servo_data[key][idx] = []
         self.start_time = time.time()
+        self.chart_y_scale = 1.1
+        self.chart_y_offset = 0.0
+        self.chart_x_zoom = 1.0
+        self.chart_x_pan = 0.0
+        self._sync_chart_control_vars()
         self.update_chart()
         self.status_var.set("Chart data cleared")
     
@@ -1374,6 +2384,12 @@ class AmazingHandGUI:
                 servo_ids.extend([finger.servo1_id, finger.servo2_id])
                 positions.extend([pos1, pos2])
                 speeds.extend([speed, speed])
+
+            with self.feedback_lock:
+                self.latest_goal_positions = list(positions)
+                for idx, value in enumerate(self.latest_goal_positions):
+                    if idx < len(self.feedback_data['goal']):
+                        self.feedback_data['goal'][idx] = value
             
             # Set speeds
             for servo_id, speed in zip(servo_ids, speeds):
@@ -1668,6 +2684,7 @@ class AmazingHandGUI:
             pose_data = poses[selected_name]
             positions = pose_data.get('positions', [0]*8)
             target_snapshot = list(positions)
+            snapshot_tuple = tuple(target_snapshot)
 
             # Apply positions to fingers (keep current speeds)
             for idx, finger in enumerate(self.fingers):
@@ -1678,7 +2695,8 @@ class AmazingHandGUI:
             # Trigger position update
             self.update_pending = True
             self.send_positions()
-
+            pose_id = self._log_pose_start(selected_name, snapshot_tuple)
+        
             self.status_var.set(f"Set pose '{selected_name}'")
             # Calculate delay: estimate movement time based on max position change
             # Speed ranges 1-6, assume ~200ms per 10° at speed 3
@@ -1686,7 +2704,7 @@ class AmazingHandGUI:
             avg_speed = sum(f.get_speed() for f in self.fingers) / len(self.fingers)
             # Base delay + movement-dependent delay (slower speeds need more time)
             delay_ms = int(500 + (max_movement / 10) * (200 / avg_speed) * 3)
-            self.root.after(delay_ms, lambda: self._log_pose_completion(selected_name, target_snapshot))
+            self.root.after(delay_ms, lambda pid=pose_id, tgt=snapshot_tuple: self._log_pose_completion(selected_name, tgt, pose_id=pid))
         
         except Exception as e:
             self.status_var.set(f"Error setting pose: {e}")
@@ -2182,9 +3200,10 @@ class AmazingHandGUI:
     
     def _apply_pose(self, pose, name):
         """Apply a pose to the GUI (called from main thread)."""
+        pose_positions = pose.get('positions', [0]*8)
         for idx, finger in enumerate(self.fingers):
-            pos1 = pose['positions'][idx * 2]
-            pos2 = pose['positions'][idx * 2 + 1]
+            pos1 = pose_positions[idx * 2]
+            pos2 = pose_positions[idx * 2 + 1]
             finger.set_positions(pos1, pos2)
             finger.speed_var.set(pose['speed'])
         
@@ -2192,12 +3211,13 @@ class AmazingHandGUI:
         self.update_pending = True
         self.send_positions()
         self.status_var.set(f"Executing: {name}")
+        pose_id = self._log_pose_start(name, pose_positions)
         # Wait for servos to reach target (using pose speed)
-        self.root.after(2000, lambda: self._log_pose_completion(name, pose.get('positions', [])))
+        self.root.after(2000, lambda pid=pose_id, tgt=tuple(pose_positions): self._log_pose_completion(name, tgt, pose_id=pid))
     
     def _apply_pose_from_config(self, pose_data, name, speeds=None):
         """Apply a pose from YAML config format."""
-        positions = pose_data.get('positions', [0]*8)
+        positions = list(pose_data.get('positions', [0]*8))
         if speeds is None:
             speeds = [3] * 8  # Default speeds if not provided
         
@@ -2210,8 +3230,133 @@ class AmazingHandGUI:
         self.update_pending = True
         self.send_positions()
         self.status_var.set(f"Executing: {name}")
+        pose_id = self._log_pose_start(name, positions)
         # Wait for servos to reach target
-        self.root.after(2000, lambda: self._log_pose_completion(name, positions))
+        self.root.after(2000, lambda pid=pose_id, tgt=tuple(positions): self._log_pose_completion(name, tgt, pose_id=pid))
+
+    def _read_moving_flags(self):
+        """Return boolean moving flags for all servos if supported."""
+        if not self.connected or self.controller is None:
+            return None
+
+        if not self._moving_flags_supported:
+            return None
+
+        servo_ids = list(range(1, 9))
+        controller = self.controller
+
+        if self._moving_use_sync is None:
+            self._moving_use_sync = hasattr(controller, 'sync_read_moving')
+
+        raw = None
+        last_exc = None
+        attempts = []
+        if self._moving_use_sync:
+            attempts.append('sync')
+        attempts.append('single')
+
+        for mode in attempts:
+            try:
+                if mode == 'sync':
+                    raw = controller.sync_read_moving(servo_ids)
+                else:
+                    if not hasattr(controller, 'read_moving'):
+                        last_exc = RuntimeError("Controller lacks read_moving API")
+                        break
+                    raw = [controller.read_moving(sid) for sid in servo_ids]
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                if mode == 'sync':
+                    self._moving_use_sync = False
+                    if not self._moving_sync_warning_logged:
+                        self.log("sync_read_moving timed out; falling back to per-servo reads")
+                        self._moving_sync_warning_logged = True
+                else:
+                    break
+
+        if raw is None:
+            self._moving_failure_count += 1
+            if self._moving_failure_count >= 3:
+                if self._moving_flags_supported:
+                    msg = "Disabling movement-flag supervision after repeated read errors"
+                    self.log(msg)
+                self._moving_flags_supported = False
+            else:
+                if last_exc is not None:
+                    self.log(f"Error reading moving flags: {last_exc}")
+            return None
+
+        self._moving_failure_count = 0
+
+        def to_list(value):
+            if isinstance(value, np.ndarray):
+                return value.tolist()
+            if isinstance(value, (list, tuple)):
+                return list(value)
+            return [value]
+
+        values = None
+        if isinstance(raw, dict):
+            values = [raw.get(sid, 0) for sid in servo_ids]
+        else:
+            raw_list = to_list(raw)
+            mapped = False
+            if len(raw_list) == 2 and isinstance(raw_list[0], (list, tuple)) and isinstance(raw_list[1], (list, tuple)):
+                ids_candidate = list(raw_list[0])
+                vals_candidate = list(raw_list[1])
+                if len(ids_candidate) == len(vals_candidate):
+                    mapping = {}
+                    for sid, val in zip(ids_candidate, vals_candidate):
+                        try:
+                            mapping[int(sid)] = val
+                        except Exception:
+                            continue
+                    values = [mapping.get(sid, 0) for sid in servo_ids]
+                    mapped = True
+            if not mapped:
+                if all(isinstance(item, (list, tuple)) and len(item) == 2 for item in raw_list):
+                    mapping = {}
+                    for sid, val in raw_list:
+                        try:
+                            mapping[int(sid)] = val
+                        except Exception:
+                            continue
+                    values = [mapping.get(sid, 0) for sid in servo_ids]
+                else:
+                    values = raw_list
+
+        if values is None:
+            values = [0] * len(servo_ids)
+        if len(values) < len(servo_ids):
+            values = list(values) + [0] * (len(servo_ids) - len(values))
+        values = values[:len(servo_ids)]
+
+        def as_bool(entry):
+            if isinstance(entry, np.ndarray):
+                try:
+                    entry = entry.item()
+                except ValueError:
+                    data = entry.tolist()
+                    entry = data[0] if isinstance(data, list) and data else 0
+            if isinstance(entry, (list, tuple)):
+                entry = entry[-1]
+            try:
+                return bool(int(entry))
+            except Exception:
+                return bool(entry)
+
+        return [as_bool(v) for v in values]
+
+    def _log_pose_start(self, name, target_positions):
+        """Log the beginning of a pose application and return a unique pose id."""
+        self.pose_log_counter += 1
+        pose_id = self.pose_log_counter
+        positions = tuple(target_positions)
+        target_repr = '[' + ', '.join(str(int(p)) for p in positions) + ']'
+        self.log(f"Pose #{pose_id} start '{name}' → target={target_repr}")
+        return pose_id
 
     def _read_actual_positions(self):
         """Return the latest measured servo positions, if available."""
@@ -2234,7 +3379,7 @@ class AmazingHandGUI:
                 deg = float(np.rad2deg(pos))
                 if servo_id % 2 == 0:
                     deg = -deg
-                readings.append(int(round(deg)))
+                readings.append(round(float(deg), 2))
             with self.actual_pos_lock:
                 self.latest_actual_positions = list(readings)
                 self.latest_actual_timestamp = time.time()
@@ -2242,28 +3387,64 @@ class AmazingHandGUI:
         except Exception:
             return None
 
-    def _log_pose_completion(self, name, target_positions):
+    def _log_pose_completion(self, name, target_positions, pose_id=None, wait_started=None, timeout=None, wait_notified=False):
         """Write target vs. actual servo positions to the log."""
+        target_positions = tuple(target_positions)
+        now = time.time()
+        if wait_started is None:
+            wait_started = now
+        if timeout is None:
+            timeout = self.movement_timeout
+
+        moving_flags = self._read_moving_flags()
+        if moving_flags is not None and any(moving_flags):
+            if (now - wait_started) < timeout:
+                if not wait_notified:
+                    if pose_id is not None:
+                        self.log(f"⌛ Pose #{pose_id} '{name}': waiting for servos before logging...")
+                    else:
+                        self.log(f"⌛ Waiting for servos to finish '{name}' before logging...")
+                    wait_notified = True
+                delay_ms = int(self.movement_poll_interval * 1000)
+                self.root.after(
+                    delay_ms,
+                    lambda n=name, t=target_positions, pid=pose_id, ws=wait_started, to=timeout, wn=wait_notified: self._log_pose_completion(n, t, pid, ws, to, wn)
+                )
+                return
+            if pose_id is not None:
+                self.log(f"⚠ Pose #{pose_id} '{name}' timed out after {timeout:.1f}s waiting for servos to stop")
+            else:
+                self.log(f"⚠ WARNING: Timed out after {timeout:.1f}s waiting for servos to stop for '{name}'")
+
         target_repr = '[' + ', '.join(str(p) for p in target_positions) + ']'
         actual_positions = self._read_actual_positions()
         if actual_positions is None:
             actual_repr = '<not connected>'
         else:
-            actual_repr = '[' + ', '.join(str(int(p)) for p in actual_positions) + ']'
-            # Check if servos reached targets (within 5 degrees tolerance)
+            actual_repr = '[' + ', '.join(f"{float(p):.2f}" for p in actual_positions) + ']'
             if actual_positions:
-                max_error = max(abs(target_positions[i] - actual_positions[i]) for i in range(min(len(target_positions), len(actual_positions))))
+                max_error = max(
+                    abs(target_positions[i] - actual_positions[i])
+                    for i in range(min(len(target_positions), len(actual_positions)))
+                )
                 if max_error > 5:
-                    self.log(f"⚠ WARNING: Servos did not reach target! Max error: {max_error:.0f}°")
-                    self.log(f"  This may indicate: mechanical limits, servo configuration limits, or insufficient torque")
-        self.log(f"Pose '{name}' complete → target={target_repr} current={actual_repr}")
+                    if pose_id is not None:
+                        self.log(f"⚠ Pose #{pose_id} '{name}': Servos did not reach target! Max error: {max_error:.0f}°")
+                    else:
+                        self.log(f"⚠ WARNING: Servos did not reach target! Max error: {max_error:.0f}°")
+                    self.log("  This may indicate: mechanical limits, servo configuration limits, or insufficient torque")
+        if pose_id is not None:
+            self.log(f"Pose #{pose_id} '{name}' complete → target={target_repr} current={actual_repr}")
+        else:
+            self.log(f"Pose '{name}' complete → target={target_repr} current={actual_repr}")
     
     def log(self, message):
         """Add message to log output with timestamp."""
-        from datetime import datetime
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # HH:MM:SS.mmm
+        console_message = f"[{timestamp}] {message}"
+        print(console_message, flush=True)
         self.log_text.config(state='normal')
-        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        self.log_text.insert(tk.END, console_message + "\n")
         self.log_text.see(tk.END)
         self.log_text.config(state='disabled')
     
