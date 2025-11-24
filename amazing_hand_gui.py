@@ -1057,29 +1057,32 @@ class AmazingHandGUI:
                         current_pos_rad = self.controller.read_present_position(servo_id)
                         if isinstance(current_pos_rad, np.ndarray):
                             current_pos_rad = current_pos_rad.item()
-                        current_pos = np.rad2deg(current_pos_rad)
+                        current_pos = float(np.rad2deg(current_pos_rad))
                         if servo_id % 2 == 0:
                             current_pos = -current_pos
                         with self.actual_pos_lock:
                             if self.latest_actual_positions is None:
                                 self.latest_actual_positions = [0] * 8
-                            self.latest_actual_positions[idx] = int(round(current_pos))
+                            self.latest_actual_positions[idx] = int(round(float(current_pos)))
                             self.latest_actual_timestamp = time.time()
                         
                         # Read load (force)
                         load = self.controller.read_present_load(servo_id)
                         if isinstance(load, np.ndarray):
                             load = load.item()
+                        load = float(load)
                         
                         # Read temperature
                         temp = self.controller.read_present_temperature(servo_id)
                         if isinstance(temp, np.ndarray):
                             temp = temp.item()
+                        temp = float(temp)
                         
                         # Read voltage
                         voltage = self.controller.read_present_voltage(servo_id)
                         if isinstance(voltage, np.ndarray):
                             voltage = voltage.item()
+                        voltage = float(voltage)
                         
                         # Get target position from finger controls
                         finger_idx = idx // 2
@@ -2205,7 +2208,7 @@ class AmazingHandGUI:
                 pos = self.controller.read_present_position(servo_id)
                 if isinstance(pos, np.ndarray):
                     pos = pos.item()
-                deg = np.rad2deg(pos)
+                deg = float(np.rad2deg(pos))
                 if servo_id % 2 == 0:
                     deg = -deg
                 readings.append(int(round(deg)))
