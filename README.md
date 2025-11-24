@@ -140,49 +140,6 @@ python amazing_hand_cmd.py --all --read
 python amazing_hand_cmd.py --print
 ```
 
-#### Scenes (`data/poses.csv`)
-
-`amazing_hand_cmd.py` can execute named scenes from a CSV file. Example format:
-
-```csv
-scene,pos1,pos2,pos3,pos4,pos5,pos6,pos7,pos8,speed
-open,0,0,0,0,0,0,0,0,6
-close,90,90,90,90,90,90,90,90,3
-ok,0,0,90,90,0,0,0,0,4
-```
-
-Example usage:
-
-```bash
-# Execute named scenes
-python amazing_hand_cmd.py --scenes data/poses.csv --keys open close ok --enable
-
-# Override scene speed per call
-python amazing_hand_cmd.py --scenes data/poses.csv --keys "open:3" "close:6" --enable
-
-# Add current hand pose as a new scene
-python amazing_hand_cmd.py --add-scene data/poses.csv mypose --speed 3
-```
-
-#### Sequences from CSV
-
-You can run movement sequences from a CSV file such as `example_sequence.csv`:
-
-```csv
-id,hint,pos1,pos2,pos3,pos4,pos5,pos6,pos7,pos8,speed,sleep_before,sleep_after
-1,Open hand,0,0,0,0,0,0,0,0,6,0,1.0
-2,Close hand,90,90,90,90,90,90,90,90,3,0,0.5
-```
-
-Run a sequence:
-
-```bash
-python amazing_hand_cmd.py --sequence example_sequence.csv --enable
-
-# Loop continuously
-python amazing_hand_cmd.py --sequence example_sequence.csv --loop --enable
-```
-
 #### Interactive Mode
 
 Start an interactive shell to control individual servos:
