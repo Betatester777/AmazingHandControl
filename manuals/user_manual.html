@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>user_manual.md</title>
+<meta http-equiv="Content-type" content="text/html;charset=UTF-8">
+
+<style>
+/* https://github.com/microsoft/vscode/blob/master/extensions/markdown-language-features/media/markdown.css */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+body {
+	font-family: var(--vscode-markdown-font-family, -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif);
+	font-size: var(--vscode-markdown-font-size, 14px);
+	padding: 0 26px;
+	line-height: var(--vscode-markdown-line-height, 22px);
+	word-wrap: break-word;
+}
+
+#code-csp-warning {
+	position: fixed;
+	top: 0;
+	right: 0;
+	color: white;
+	margin: 16px;
+	text-align: center;
+	font-size: 12px;
+	font-family: sans-serif;
+	background-color:#444444;
+	cursor: pointer;
+	padding: 6px;
+	box-shadow: 1px 1px 1px rgba(0,0,0,.25);
+}
+
+#code-csp-warning:hover {
+	text-decoration: none;
+	background-color:#007acc;
+	box-shadow: 2px 2px 2px rgba(0,0,0,.25);
+}
+
+body.scrollBeyondLastLine {
+	margin-bottom: calc(100vh - 22px);
+}
+
+body.showEditorSelection .code-line {
+	position: relative;
+}
+
+body.showEditorSelection .code-active-line:before,
+body.showEditorSelection .code-line:hover:before {
+	content: "";
+	display: block;
+	position: absolute;
+	top: 0;
+	left: -12px;
+	height: 100%;
+}
+
+body.showEditorSelection li.code-active-line:before,
+body.showEditorSelection li.code-line:hover:before {
+	left: -30px;
+}
+
+.vscode-light.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(0, 0, 0, 0.15);
+}
+
+.vscode-light.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(0, 0, 0, 0.40);
+}
+
+.vscode-light.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+.vscode-dark.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(255, 255, 255, 0.4);
+}
+
+.vscode-dark.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(255, 255, 255, 0.60);
+}
+
+.vscode-dark.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+.vscode-high-contrast.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(255, 160, 0, 0.7);
+}
+
+.vscode-high-contrast.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(255, 160, 0, 1);
+}
+
+.vscode-high-contrast.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+img {
+	max-width: 100%;
+	max-height: 100%;
+}
+
+a {
+	text-decoration: none;
+}
+
+a:hover {
+	text-decoration: underline;
+}
+
+a:focus,
+input:focus,
+select:focus,
+textarea:focus {
+	outline: 1px solid -webkit-focus-ring-color;
+	outline-offset: -1px;
+}
+
+hr {
+	border: 0;
+	height: 2px;
+	border-bottom: 2px solid;
+}
+
+h1 {
+	padding-bottom: 0.3em;
+	line-height: 1.2;
+	border-bottom-width: 1px;
+	border-bottom-style: solid;
+}
+
+h1, h2, h3 {
+	font-weight: normal;
+}
+
+table {
+	border-collapse: collapse;
+}
+
+table > thead > tr > th {
+	text-align: left;
+	border-bottom: 1px solid;
+}
+
+table > thead > tr > th,
+table > thead > tr > td,
+table > tbody > tr > th,
+table > tbody > tr > td {
+	padding: 5px 10px;
+}
+
+table > tbody > tr + tr > td {
+	border-top: 1px solid;
+}
+
+blockquote {
+	margin: 0 7px 0 5px;
+	padding: 0 16px 0 10px;
+	border-left-width: 5px;
+	border-left-style: solid;
+}
+
+code {
+	font-family: Menlo, Monaco, Consolas, "Droid Sans Mono", "Courier New", monospace, "Droid Sans Fallback";
+	font-size: 1em;
+	line-height: 1.357em;
+}
+
+body.wordWrap pre {
+	white-space: pre-wrap;
+}
+
+pre:not(.hljs),
+pre.hljs code > div {
+	padding: 16px;
+	border-radius: 3px;
+	overflow: auto;
+}
+
+pre code {
+	color: var(--vscode-editor-foreground);
+	tab-size: 4;
+}
+
+/** Theming */
+
+.vscode-light pre {
+	background-color: rgba(220, 220, 220, 0.4);
+}
+
+.vscode-dark pre {
+	background-color: rgba(10, 10, 10, 0.4);
+}
+
+.vscode-high-contrast pre {
+	background-color: rgb(0, 0, 0);
+}
+
+.vscode-high-contrast h1 {
+	border-color: rgb(0, 0, 0);
+}
+
+.vscode-light table > thead > tr > th {
+	border-color: rgba(0, 0, 0, 0.69);
+}
+
+.vscode-dark table > thead > tr > th {
+	border-color: rgba(255, 255, 255, 0.69);
+}
+
+.vscode-light h1,
+.vscode-light hr,
+.vscode-light table > tbody > tr + tr > td {
+	border-color: rgba(0, 0, 0, 0.18);
+}
+
+.vscode-dark h1,
+.vscode-dark hr,
+.vscode-dark table > tbody > tr + tr > td {
+	border-color: rgba(255, 255, 255, 0.18);
+}
+
+</style>
+
+<style>
+/* Tomorrow Theme */
+/* http://jmblog.github.com/color-themes-for-google-code-highlightjs */
+/* Original theme - https://github.com/chriskempson/tomorrow-theme */
+
+/* Tomorrow Comment */
+.hljs-comment,
+.hljs-quote {
+	color: #8e908c;
+}
+
+/* Tomorrow Red */
+.hljs-variable,
+.hljs-template-variable,
+.hljs-tag,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class,
+.hljs-regexp,
+.hljs-deletion {
+	color: #c82829;
+}
+
+/* Tomorrow Orange */
+.hljs-number,
+.hljs-built_in,
+.hljs-builtin-name,
+.hljs-literal,
+.hljs-type,
+.hljs-params,
+.hljs-meta,
+.hljs-link {
+	color: #f5871f;
+}
+
+/* Tomorrow Yellow */
+.hljs-attribute {
+	color: #eab700;
+}
+
+/* Tomorrow Green */
+.hljs-string,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-addition {
+	color: #718c00;
+}
+
+/* Tomorrow Blue */
+.hljs-title,
+.hljs-section {
+	color: #4271ae;
+}
+
+/* Tomorrow Purple */
+.hljs-keyword,
+.hljs-selector-tag {
+	color: #8959a8;
+}
+
+.hljs {
+	display: block;
+	overflow-x: auto;
+	color: #4d4d4c;
+	padding: 0.5em;
+}
+
+.hljs-emphasis {
+	font-style: italic;
+}
+
+.hljs-strong {
+	font-weight: bold;
+}
+</style>
+
+<style>
+/*
+ * Markdown PDF CSS
+ */
+
+ body {
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "Meiryo";
+	padding: 0 12px;
+}
+
+pre {
+	background-color: #f8f8f8;
+	border: 1px solid #cccccc;
+	border-radius: 3px;
+	overflow-x: auto;
+	white-space: pre-wrap;
+	overflow-wrap: break-word;
+}
+
+pre:not(.hljs) {
+	padding: 23px;
+	line-height: 19px;
+}
+
+blockquote {
+	background: rgba(127, 127, 127, 0.1);
+	border-color: rgba(0, 122, 204, 0.5);
+}
+
+.emoji {
+	height: 1.4em;
+}
+
+code {
+	font-size: 14px;
+	line-height: 19px;
+}
+
+/* for inline code */
+:not(pre):not(.hljs) > code {
+	color: #C9AE75; /* Change the old color so it seems less like an error */
+	font-size: inherit;
+}
+
+/* Page Break : use <div class="page"/> to insert page break
+-------------------------------------------------------- */
+.page {
+	page-break-after: always;
+}
+
+</style>
+
+<script src="https://unpkg.com/mermaid/dist/mermaid.min.js"></script>
+</head>
+<body>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: document.body.classList.contains('vscode-dark') || document.body.classList.contains('vscode-high-contrast')
+          ? 'dark'
+          : 'default'
+    });
+  </script>
+<h1 id="amazinghand-controller-%E2%80%93-user-manual">AmazingHand Controller – User Manual</h1>
+<blockquote>
+<p><strong>Version:</strong> 2025-11-25<br>
+<strong>Applies to:</strong> <code>amazing_hand_gui.py</code> (Desktop GUI)</p>
+</blockquote>
+<hr>
+<h2 id="1-introduction">1. Introduction</h2>
+<p>The AmazingHand Controller GUI provides real-time monitoring and manual control for an eight-servo robotic hand powered by Feetech SCS0009 actuators. The interface is divided into panels for finger control, global management, telemetry visualization, and activity logging. This guide walks you through installation, navigation, and common workflows.</p>
+<blockquote>
+<p><strong>Tip:</strong> Keep this manual open while operating the GUI. Tooltips embedded in the application reiterate the same descriptions when you hover over controls.</p>
+</blockquote>
+<p><img src="./screenshots/hand_overview.png" alt="AmazingHand hardware with controller connected"></p>
+<hr>
+<h2 id="2-quick-start-checklist">2. Quick Start Checklist</h2>
+<ol>
+<li><strong>Install dependencies</strong> (one-time per environment):<pre class="hljs"><code><div>python -m pip install -r requirements.txt
+</div></code></pre>
+</li>
+<li><strong>Power the hardware:</strong> connect the 5 V supply to the servo chain and plug in the USB serial adapter.</li>
+<li><strong>Launch the GUI:</strong><pre class="hljs"><code><div>python amazing_hand_gui.py
+</div></code></pre>
+</li>
+<li><strong>Connect to the controller:</strong> choose the serial <strong>Port</strong> (e.g., <code>COM9</code>) and click <strong>▶ Connect</strong>.</li>
+<li><strong>Verify telemetry:</strong> look for live updates in the chart and feedback table.</li>
+</ol>
+<hr>
+<h2 id="3-screen-overview">3. Screen Overview</h2>
+<pre class="hljs"><code><div>+--------------------------------------------------------------------------------+
+|                              AmazingHand Controller                            |
++---------------------------+-----------------------------------------------+----+
+| Finger Controls           | Chart Controls &amp; Telemetry Plot                    |
+| (Pointer–Thumb)           | (Display menu, chart canvas)                       |
++---------------------------+-----------------------------------------------+----+
+| Control Stack             | Feedback Table (Servo Metrics)                     |
+| (Connection, Global, Pose,| (Goal, Position, Load, Speed, etc.)                |
+|  Sequence)                |                                                    |
++---------------------------+                                                    |
+| Execution Log &amp; Status    |                                                     |
++--------------------------------------------------------------------------------+
+</div></code></pre>
+<p><img src="./screenshots/mainscreen.png" alt="Main window overview highlighting the major panels"></p>
+<h3 id="31-panels-at-a-glance">3.1 Panels at a Glance</h3>
+<table>
+<thead>
+<tr>
+<th>Panel</th>
+<th>Location</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Finger Controls</strong></td>
+<td>Left, top</td>
+<td>Individual sliders and speed selectors for each finger pair. Includes mimic indicators and per-finger status LEDs.</td>
+</tr>
+<tr>
+<td><strong>Right Control Stack</strong></td>
+<td>Left, bottom-right</td>
+<td>Connection settings, global controls, pose management, and sequence player.</td>
+</tr>
+<tr>
+<td><strong>Telemetry Panel</strong></td>
+<td>Right</td>
+<td>Real-time charts with zoom/pan sliders and a configurable feedback table.</td>
+</tr>
+<tr>
+<td><strong>Execution Log</strong></td>
+<td>Bottom</td>
+<td>Stream of status messages, warnings, and sequence progress.</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="4-detailed-panel-guide">4. Detailed Panel Guide</h2>
+<h3 id="41-finger-control-panel-left-column">4.1 Finger Control Panel (Left Column)</h3>
+<p>Each finger widget controls a pair of servos (position + side offset):</p>
+<ul>
+<li><strong>Mode toggle:</strong> switch between <strong>Auto</strong> (base + offset sliders) and <strong>Raw</strong> (direct servo targets).</li>
+<li><strong>Status LED:</strong> gray (idle), green (moving), red (blocked potential, based on load vs goal).</li>
+<li><strong>Position slider:</strong> 0–110° (open to closed). Mouse wheel adjusts by 1°; dragging snaps quickly.</li>
+<li><strong>Side slider:</strong> ±20° for lateral adjustments.</li>
+<li><strong>Speed selector:</strong> dropdown 1–6 controlling movement velocity for both servos in the finger pair.</li>
+<li><strong>Mimic checkbox:</strong> mirrors close/open motions from a source finger for coordinated movement while in Auto mode.</li>
+</ul>
+<p><strong>Finger Modes: Auto vs Raw</strong></p>
+<ul>
+<li><strong>Auto mode</strong> (default) exposes the close/open slider, lateral offset slider, speed dropdown, and center button. The GUI blends those two slider values into servo commands using the calibrated extremes stored in <code>data/hand_config.yaml</code>, so the pair tracks natural finger poses without manual servo math. Mimic stays active here—enable it on multiple fingers to drive them in sync with whichever finger you are currently adjusting.</li>
+<li><strong>Raw mode</strong> swaps the Auto controls for two vertical sliders labeled by servo. Move them to command the underlying servo angles directly when testing end-stops, validating calibration, or diagnosing linkage issues. The center button and mimic checkbox are disabled because Raw bypasses the auto-mixing logic; keyboard shortcuts still work, with Up/Down driving servo 1 and Left/Right driving servo 2. Raw uses the last-selected speed value, so set speeds before switching if you need a specific motion rate.</li>
+</ul>
+<p><strong>How Auto mode computes servo targets</strong></p>
+<ul>
+<li>The close/open slider value is clamped to <code>limits.base_min/base_max</code>, then normalized (<code>t = base / base_max</code>) to interpolate between the <code>auto_extremes</code> open vs closed poses for each side of the finger.</li>
+<li>The side offset slider is clamped to <code>limits.side_min/side_max</code> and turned into a blend factor (<code>u</code>). Negative offsets lerp from the center pose toward <code>left_open</code>/<code>left_closed</code>; positive offsets lerp toward the right-side extremes.</li>
+<li>With no lateral offset, both servos simply receive the base slider value. Final servo targets are clamped to <code>limits.servo_min/servo_max</code> before being issued, keeping motions within calibrated safe bounds.</li>
+</ul>
+<p>Keyboard shortcuts supplement the sliders (documented in §5.2).</p>
+<p><img src="./screenshots/finger_control_frame.png" alt="Finger control panel with per-finger sliders and status indicators"></p>
+<h3 id="42-global-control-stack-right-of-finger-panel">4.2 Global Control Stack (Right of Finger Panel)</h3>
+<ol>
+<li><strong>Connection:</strong> port selection, baudrate, connect/disconnect buttons. Status bar at the bottom reports success or errors.</li>
+<li><strong>Global Controls:</strong>
+<ul>
+<li><strong>Open All / Close All / Center All</strong> – apply to every finger instantly.</li>
+<li><strong>Global Speed dropdown</strong> – sets the per-finger speed selectors to a common value (1–6).</li>
+</ul>
+</li>
+<li><strong>Pose Management:</strong> save, load, and apply stored poses from <code>data/hand_config.yaml</code>.</li>
+<li><strong>Sequence Player:</strong> select and execute multi-step animations, with optional looping. Access the sequence manager dialog via <strong>🔧 Manage</strong>.</li>
+</ol>
+<p><img src="./screenshots/control_frame.png" alt="Connection, global controls, pose management, and sequence player stack"></p>
+<h3 id="43-telemetry--feedback-panel-right-column">4.3 Telemetry &amp; Feedback Panel (Right Column)</h3>
+<ul>
+<li><strong>Controls row:</strong>
+<ul>
+<li>Pause/resume chart updates.</li>
+<li>Rolling window toggle.</li>
+<li>Metric selection (position, load, speed, temperature, voltage, moving flag).</li>
+<li>Mode switch (Multi-Servo vs Scope) with servo selector for the latter.</li>
+<li>Servo visibility dropdown with “All/None/Clear” helpers.</li>
+</ul>
+</li>
+</ul>
+<p><img src="./screenshots/chart_mode_controls.png" alt="Display mode, metric selection, and scope controls"></p>
+<p><img src="./screenshots/chart_select_display_values.png" alt="Display menu for choosing telemetry metrics"></p>
+<p><img src="./screenshots/chart_servos_selection.png" alt="Servo visibility menu with quick actions"></p>
+<h4 id="chart-modes">Chart Modes</h4>
+<ul>
+<li><strong>Multi-Servo</strong> (default) keeps every enabled servo trace on the chart. Use the <strong>Servos</strong> dropdown to quickly toggle groups on/off and compare motion or load across fingers.</li>
+<li><strong>Scope</strong> activates the <strong>Scope Servo</strong> selector, letting you focus on a single channel while still using the same metric checkboxes. Combine this mode with the servo visibility menu (e.g., hide all, then re-enable the scope servo) to obtain an oscilloscope-style view without other traces.</li>
+<li>Regardless of mode, the telemetry table keeps presenting all servos so you can correlate the focused chart with the wider data snapshot.</li>
+<li><strong>Chart area:</strong> Matplotlib plot showing selected telemetry. Zoom via sliders:
+<ul>
+<li><strong>Y Zoom / Pan:</strong> vertical scaling and shifting.</li>
+<li><strong>Time Zoom / Pan:</strong> focus on recent history or older samples.</li>
+</ul>
+</li>
+<li><strong>Feedback table:</strong> scrollable grid summarizing Goal, Position, Speed, Load, Voltage, Temperature, Status, and Moving flags for each servo.</li>
+</ul>
+<p><img src="./screenshots/chart_frame.png" alt="Chart controls with zoom/pan sliders and telemetry traces"></p>
+<p><img src="./screenshots/feedback_frame.png" alt="Feedback table showing live servo metrics"></p>
+<h3 id="44-execution-log--status-bar">4.4 Execution Log &amp; Status Bar</h3>
+<p>Located below the finger panel, the log records operations in chronological order. The status bar displays the latest action or warning.</p>
+<p><img src="./screenshots/log_and_last_action_frame.png" alt="Execution log and current status bar"></p>
+<hr>
+<h2 id="5-operating-the-hand">5. Operating the Hand</h2>
+<h3 id="51-connecting-to-hardware">5.1 Connecting to Hardware</h3>
+<ol>
+<li>Power the servos and connect the USB adapter.</li>
+<li>Launch the GUI and confirm the correct <strong>Port</strong> auto-selects (<code>COM*</code> on Windows or <code>/dev/tty*</code> on Linux/macOS).</li>
+<li>Click <strong>▶ Connect</strong>. Success changes the button states and updates the status bar.</li>
+<li>If connection fails, check cabling, power, and port assignment.</li>
+</ol>
+<h3 id="52-manual-control-and-shortcuts">5.2 Manual Control and Shortcuts</h3>
+<ul>
+<li>Select a finger with keys <strong>1–4</strong>.</li>
+<li><strong>Arrow keys:</strong> Up/Down adjust the position; Left/Right adjust lateral offset.</li>
+<li>Holding <strong>Shift</strong> multiplies step size by 5; <strong>Ctrl</strong> multiplies by 10.</li>
+<li><strong>Q / E:</strong> fully close / open the selected finger.</li>
+<li><strong>C:</strong> center lateral offset.</li>
+<li>The on-screen sliders mirror the keyboard input in real time.</li>
+</ul>
+<p><img src="./screenshots/manual_finger_control_frame.png" alt="Manual finger control panel with keyboard shortcut overlay"></p>
+<p><img src="./screenshots/close_finger.png" alt="Example of fully closing a finger using controls"></p>
+<p><img src="./screenshots/move_finger.png" alt="Example of lateral movement adjustment"></p>
+<h3 id="53-setting-speeds">5.3 Setting Speeds</h3>
+<ul>
+<li>Per-finger speed dropdown (1 = slow, 6 = fast) controls servo velocity.</li>
+<li>The <strong>Global Speed</strong> selector synchronizes all finger speeds.</li>
+<li>Observe speed changes in the feedback table (<code>Speed</code> row) during motion.</li>
+</ul>
+<h3 id="54-applying-poses">5.4 Applying Poses</h3>
+<ol>
+<li>Arrange finger positions using sliders or keyboard shortcuts.</li>
+<li>In <strong>Pose Management</strong>, type a unique name and click <strong>➕ Add New</strong>.</li>
+<li>To apply, select the pose from the dropdown and click <strong>✓ Apply</strong>.</li>
+</ol>
+<blockquote>
+<p>Poses store servo positions only; speeds are determined at runtime by the GUI settings.</p>
+</blockquote>
+<h3 id="55-building-and-executing-sequences">5.5 Building and Executing Sequences</h3>
+<ol>
+<li>Click <strong>🔧 Manage</strong> in the Sequence Player.</li>
+<li>In the dialog:
+<ul>
+<li>Use the <strong>Available Poses</strong> list to add steps (double-click or press <strong>➕ Add</strong>).</li>
+<li>Adjust per-finger speeds via spinboxes, and set optional step delays.</li>
+<li>Insert dedicated sleep intervals using <strong>⏱ Delay</strong>.</li>
+<li>Reorder steps with ↑/↓ buttons.</li>
+<li>Enter a name and click <strong>💾 Save Sequence</strong>.</li>
+<li>Click <strong>▶ Execute</strong> to test without saving.</li>
+</ul>
+</li>
+<li>Back in the main window, select the sequence and press <strong>▶ Play</strong>. Enable <strong>Loop</strong> for continuous playback.</li>
+</ol>
+<blockquote>
+<p>Sequence definitions live in <code>data/hand_config.yaml</code> under the <code>sequences</code> key. Loops are controlled runtime-side, not in YAML.</p>
+</blockquote>
+<p><img src="./screenshots/sequences_editor.png" alt="Sequence manager dialog with available poses and sequence builder"></p>
+<h3 id="56-monitoring-telemetry">5.6 Monitoring Telemetry</h3>
+<ul>
+<li>Ensure desired metrics are checked in the <strong>Display</strong> menu.</li>
+<li>Use the zoom/pan sliders to focus on segments of interest.</li>
+<li>Hover over chart elements (Matplotlib standard interactions) to inspect values.</li>
+<li>The feedback table updates asynchronously; highlighted cells indicate recent changes.</li>
+<li>If the chart becomes busy, click <strong>⌫ Clear</strong> to reset collected data.</li>
+</ul>
+<hr>
+<h2 id="6-troubleshooting">6. Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Suggested Action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>No serial ports listed</strong></td>
+<td>Replug the USB adapter, install drivers, or restart the GUI.</td>
+</tr>
+<tr>
+<td><strong>Connect button greyed out</strong></td>
+<td>Already connected; click <strong>⏹ Disconnect</strong> first.</td>
+</tr>
+<tr>
+<td><strong>Sluggish UI during resizing</strong></td>
+<td>Performance optimizations (debounced resize, throttled redraws) minimize this, but closing unnecessary windows can help.</td>
+</tr>
+<tr>
+<td><strong>Sequence does not move all fingers</strong></td>
+<td>Check per-step speeds and ensure each pose contains all eight servo values.</td>
+</tr>
+<tr>
+<td><strong>Blocked indicator persists</strong></td>
+<td>Inspect mechanical obstructions; blocked status is triggered when goal and position differ significantly without movement.</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="7-command-line-companion-amazinghandcmdpy">7. Command-Line Companion (<code>amazing_hand_cmd.py</code>)</h2>
+<p>For scripted operations, refer to the CLI section in <code>README.md</code>. The GUI and CLI share the same configuration file (<code>data/hand_config.yaml</code>).</p>
+<hr>
+<h2 id="8-appendix">8. Appendix</h2>
+<h3 id="81-file-structure">8.1 File Structure</h3>
+<pre class="hljs"><code><div>AmazingHandControlV2/
+├── amazing_hand_gui.py          # GUI application
+├── amazing_hand_cmd.py          # CLI tool
+├── data/hand_config.yaml        # Poses &amp; sequences
+├── docs/user_manual.md          # This document
+├── screenshots/                 # PNG captures embedded in this manual
+├── PERFORMANCE_OPTIMIZATIONS.md # Rendering improvements
+└── README.md                    # Quick reference
+</div></code></pre>
+<h3 id="82-useful-links">8.2 Useful Links</h3>
+<ul>
+<li><a href="https://github.com/pollen-robotics/AmazingHand">AmazingHand (official project)</a></li>
+<li><a href="https://github.com/Robot-Maker-SAS/FeetechServo/tree/main/feetech%20debug%20tool%20master/FD1.9.8.2">Feetech Servo Debug Tool</a></li>
+<li><a href="https://www.robot-maker.com/forum/tutorials/article/168-brancher-et-controler-le-servomoteur-feetech-sts3032-360/">Servo identification tutorial</a></li>
+</ul>
+<hr>
+<h2 id="9-revision-history">9. Revision History</h2>
+<table>
+<thead>
+<tr>
+<th>Date</th>
+<th>Author</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2025-11-25</td>
+<td>Ingo</td>
+<td>Added expanded screenshot gallery, chart mode explanations, and refreshed panel walkthroughs.</td>
+</tr>
+<tr>
+<td>2025-11-25</td>
+<td>Ingo</td>
+<td>Initial manual covering UI panels, workflows, and telemetry usage.</td>
+</tr>
+</tbody>
+</table>
+
+</body>
+</html>

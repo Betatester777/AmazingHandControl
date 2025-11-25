@@ -1596,6 +1596,7 @@ class AmazingHandGUI:
         chart_feedback_split.paneconfig(feedback_container, stretch='always', minsize=150)
         # Right side - Y axis sliders (vertical, 100% height)
         y_sliders_frame = ttk.Frame(chart_container, width=30)
+        y_sliders_frame.pack(side='right', fill='y', padx=(4, 0), pady=2)
 
         # Chart and slider layout container
         
@@ -1603,13 +1604,23 @@ class AmazingHandGUI:
         y_zoom_container = ttk.Frame(y_sliders_frame)
         y_zoom_container.pack(fill='both', expand=True, pady=(0,3))
         
-        ttk.Label(y_zoom_container, text="Y\nZoom").pack(anchor='center')
+        ttk.Label(
+            y_zoom_container,
+            text="Y\nZoom",
+            anchor='center',
+            justify='center'
+        ).pack(anchor='center')
         self.y_zoom_slider = ttk.Scale(
             y_zoom_container, from_=5.0, to=0.2, orient='vertical',
             variable=self.y_zoom_var, command=self._on_y_zoom_slider
         )
         self.y_zoom_slider.pack(fill='both', expand=True, pady=1, padx=2)
-        self.y_zoom_value_label = ttk.Label(y_zoom_container, text=f"{self.chart_y_scale:.2f}×")
+        self.y_zoom_value_label = ttk.Label(
+            y_zoom_container,
+            text=f"{self.chart_y_scale:.2f}×",
+            anchor='center',
+            justify='center'
+        )
         self.y_zoom_value_label.pack(anchor='center')
         attach_tooltip(self.y_zoom_slider, "Slide to zoom the Y axis in/out.")
         
@@ -1617,13 +1628,23 @@ class AmazingHandGUI:
         y_pan_container = ttk.Frame(y_sliders_frame)
         y_pan_container.pack(fill='both', expand=True, pady=(3,0))
         
-        ttk.Label(y_pan_container, text="Y\nPan").pack(anchor='center')
+        ttk.Label(
+            y_pan_container,
+            text="Y\nPan",
+            anchor='center',
+            justify='center'
+        ).pack(anchor='center')
         self.y_pan_slider = ttk.Scale(
             y_pan_container, from_=3.0, to=-3.0, orient='vertical',
             variable=self.y_pan_var, command=self._on_y_pan_slider
         )
         self.y_pan_slider.pack(fill='both', expand=True, pady=1, padx=2)
-        self.y_pan_value_label = ttk.Label(y_pan_container, text=f"{self.chart_y_offset:.2f}")
+        self.y_pan_value_label = ttk.Label(
+            y_pan_container,
+            text=f"{self.chart_y_offset:.2f}",
+            anchor='center',
+            justify='center'
+        )
         self.y_pan_value_label.pack(anchor='center')
         attach_tooltip(self.y_pan_slider, "Shift the Y axis window up or down.")
         

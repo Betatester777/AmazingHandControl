@@ -42,10 +42,12 @@ python amazing_hand_gui.py
 
 Features:
 - Per-finger sliders for open/close and left/right
-- Speed selection (1-6)
+- Per-finger speed selection (1-6) with a global speed sync dropdown
 - Keyboard shortcuts for quick precise movements
 - Pose and sequence management using `data/hand_config.yaml`
 - Live servo telemetry charts (position, load, temperature, voltage)
+
+See `PERFORMANCE_OPTIMIZATIONS.md` for a breakdown of the latest rendering and responsiveness improvements.
 
 #### Keyboard Controls
 
@@ -61,6 +63,11 @@ Features:
   - Q: Fully close selected finger
   - E: Fully open selected finger
   - C: Center left/right position
+
+#### Global Controls
+
+- **✋ Open All / ✊ Close All / ⊙ Center All** perform simultaneous actions on every finger widget.
+- **Global Speed** dropdown (1-6) instantly applies the chosen speed to all finger controls, keeping per-finger sliders in sync.
 
 #### Poses and Sequences
 

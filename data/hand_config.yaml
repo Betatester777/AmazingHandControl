@@ -23,6 +23,8 @@ poses:
     positions: [110, 110, 110, 110, 110, 110, 110, 110]
   test123:
     positions: [0, 0, 55, 55, 90, 110, 0, 0]
+  testwwss:
+    positions: [78, 48, 32, 32, 28, 67, 71, 35]
 sequences:
   demo:
     steps:
