@@ -513,7 +513,7 @@ class FingerControl:
     Attributes:
         pos_var (IntVar): Close/open position (0-110)
         side_var (IntVar): Side offset (-20 to +20)
-        speed_var (IntVar): Servo speed (1-6)
+        speed_var (StringVar): Servo speed selection (1-6)
         mimic_var (BooleanVar): Mimic mode enabled
     
     Note: Even servo IDs have inverted angles in hardware.
@@ -534,7 +534,7 @@ class FingerControl:
         self.app_config = load_app_config()
         
         # Create frame for this finger
-        self.frame = ttk.LabelFrame(parent, text=finger_name, padding=10)
+        self.frame = ttk.LabelFrame(parent, text=finger_name, padding=3)
         self.frame.columnconfigure(0, weight=1)
         self.frame.columnconfigure(1, weight=1)
         
@@ -565,10 +565,14 @@ class FingerControl:
         
         # Container that holds either auto or raw controls
         self.mode_stack = ttk.Frame(self.frame)
-        self.mode_stack.grid(row=1, column=0, columnspan=2, sticky='nsew', pady=(5, 0))
+        self.mode_stack.grid(row=1, column=0, columnspan=2, sticky='nsew', pady=(3, 0))
         self.mode_stack.columnconfigure(0, weight=1)
         self.mode_stack.columnconfigure(1, weight=1)
         
+        default_speed = self.app_config['speeds']['default']
+        self.default_speed = default_speed
+        self.speed_var = tk.StringVar(value=str(default_speed))
+
         # Auto mode controls
         self.auto_frame = ttk.Frame(self.mode_stack)
         self.auto_frame.grid(row=0, column=0, columnspan=2, sticky='nsew')
@@ -579,34 +583,13 @@ class FingerControl:
         self.raw_frame.grid(row=0, column=0, columnspan=2, sticky='nsew')
         self._build_raw_controls(self.raw_frame)
         
-        # Speed control (shared)
-        ttk.Label(self.frame, text="Speed:").grid(row=2, column=0, columnspan=2, pady=(10,0))
-        default_speed = self.app_config['speeds']['default']
-        self.speed_var = tk.IntVar(value=default_speed)
-        speed_frame = ttk.Frame(self.frame)
-        speed_frame.grid(row=3, column=0, columnspan=2)
-        speed_min = self.app_config['speeds']['min']
-        speed_max = self.app_config['speeds']['max']
-        for i in range(speed_min, speed_max + 1):
-            ttk.Radiobutton(
-                speed_frame, text=str(i), value=i,
-                variable=self.speed_var
-            ).pack(side='left', padx=2)
-        attach_tooltip(speed_frame, "Servo motion speed (1=slowest, 6=fastest).")
-        
-        # Center button (auto mode only)
-        self.center_btn = ttk.Button(
-            self.frame, text="⊙ Center", 
-            command=self.center_finger
-        )
-        self.center_btn.grid(row=4, column=0, columnspan=2, pady=(10,0), sticky='ew')
-        attach_tooltip(self.center_btn, "Reset left/right offset to 0° for this finger.")
-        
         self._update_mode_visibility()
         self.update_activity_state(False, False)
         
     def _build_auto_controls(self, parent):
-        ttk.Label(parent, text="Close/Open:").grid(row=0, column=0, sticky='w')
+        parent.grid_columnconfigure(0, weight=0)
+        parent.grid_columnconfigure(1, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
         self.pos_var = tk.IntVar(value=0)
         base_min = self.app_config['limits']['base_min']
         base_max = self.app_config['limits']['base_max']
@@ -615,9 +598,9 @@ class FingerControl:
             variable=self.pos_var, command=self.on_position_change,
             length=200
         )
-        self.pos_slider.grid(row=1, column=0, padx=5)
+        self.pos_slider.grid(row=0, column=0, padx=5, sticky='ns', pady=(0, 2))
         self.pos_label = ttk.Label(parent, text="0°")
-        self.pos_label.grid(row=2, column=0)
+        self.pos_label.grid(row=1, column=0)
         attach_tooltip(self.pos_slider, "Drag or scroll to close/open the finger (0°=open, 110°=closed).")
         
         # Bind mouse wheel to position slider
@@ -625,24 +608,51 @@ class FingerControl:
         self.pos_slider.bind('<Button-5>', self.on_mouse_wheel)  # Linux scroll down
         self.pos_slider.bind('<MouseWheel>', self.on_mouse_wheel)  # Windows/Mac
         
-        # Side-to-side slider
-        ttk.Label(parent, text="Left/Right:").grid(row=0, column=1, sticky='w')
+        # Side-to-side slider and speed controls share the right column
+        right_col = ttk.Frame(parent)
+        right_col.grid(row=0, column=1, sticky='nsew', pady=(0, 0))
+        right_col.grid_columnconfigure(0, weight=1)
         self.side_var = tk.IntVar(value=0)
         side_min = self.app_config['limits']['side_min']
         side_max = self.app_config['limits']['side_max']
         self.side_slider = ttk.Scale(
-            parent, from_=side_max, to=side_min, orient='horizontal',
+            right_col, from_=side_max, to=side_min, orient='horizontal',
             variable=self.side_var, command=self.on_side_change,
             length=200
         )
-        self.side_slider.grid(row=1, column=1, padx=5)
-        self.side_label = ttk.Label(parent, text="0°")
-        self.side_label.grid(row=2, column=1)
+        self.side_slider.grid(row=0, column=0, padx=5, sticky='new', pady=(0, 0))
+        self.side_label = ttk.Label(right_col, text="0°")
+        self.side_label.grid(row=1, column=0, sticky='w', padx=5)
         attach_tooltip(self.side_slider, "Drag to move finger laterally (negative=left, positive=right).")
+
+        speed_min = self.app_config['speeds']['min']
+        speed_max = self.app_config['speeds']['max']
+        speed_options = [str(i) for i in range(speed_min, speed_max + 1)]
+        speed_frame = ttk.Frame(right_col)
+        speed_frame.grid(row=2, column=0, sticky='ew', pady=(0, 0))
+        self.speed_combo = ttk.Combobox(
+            speed_frame,
+            textvariable=self.speed_var,
+            values=speed_options,
+            state='readonly',
+            width=6,
+            justify='center'
+        )
+        self.speed_combo.pack(side='left', padx=2)
+        attach_tooltip(self.speed_combo, "Servo motion speed (1=slowest, 6=fastest).")
+
+        self.center_btn = ttk.Button(
+            speed_frame, text="⊙ Center",
+            command=self.center_finger,
+            width=10
+        )
+        self.center_btn.pack(side='left', padx=(8, 0))
+        attach_tooltip(self.center_btn, "Reset left/right offset to 0° for this finger.")
         
     def _build_raw_controls(self, parent):
-        ttk.Label(parent, text="Servo 1 (raw)").grid(row=0, column=0, sticky='w')
-        ttk.Label(parent, text="Servo 2 (raw)").grid(row=0, column=1, sticky='w')
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_columnconfigure(1, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
         self.raw_pos1_var = tk.IntVar(value=0)
         self.raw_pos2_var = tk.IntVar(value=0)
         servo_min = self.app_config['limits']['servo_min']
@@ -657,12 +667,12 @@ class FingerControl:
             variable=self.raw_pos2_var, command=lambda v: self._on_raw_change(2, v),
             length=200
         )
-        self.raw_slider1.grid(row=1, column=0, padx=5)
-        self.raw_slider2.grid(row=1, column=1, padx=5)
+        self.raw_slider1.grid(row=0, column=0, padx=5, sticky='ns', pady=(0, 2))
+        self.raw_slider2.grid(row=0, column=1, padx=5, sticky='ns', pady=(0, 2))
         self.raw_pos1_label = ttk.Label(parent, text="0°")
         self.raw_pos2_label = ttk.Label(parent, text="0°")
-        self.raw_pos1_label.grid(row=2, column=0)
-        self.raw_pos2_label.grid(row=2, column=1)
+        self.raw_pos1_label.grid(row=1, column=0)
+        self.raw_pos2_label.grid(row=1, column=1)
         attach_tooltip(self.raw_slider1, "Directly command servo 1 target angle.")
         attach_tooltip(self.raw_slider2, "Directly command servo 2 target angle.")
     
@@ -754,7 +764,10 @@ class FingerControl:
     
     def get_speed(self):
         """Get current speed setting."""
-        return self.speed_var.get()
+        try:
+            return int(float(self.speed_var.get()))
+        except (TypeError, ValueError):
+            return int(self.default_speed)
     
     def set_positions(self, pos1, pos2):
         """Set slider positions from servo values."""
@@ -1000,7 +1013,7 @@ class AmazingHandGUI:
             port = default_serial_port()
         self.root = tk.Tk()
         self.root.title(f"AmazingHand Controller v{APP_VERSION}")
-        self.root.geometry("1400x800")
+        self.root.geometry("1920x1200")
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
         # Store connection parameters
@@ -1093,18 +1106,30 @@ class AmazingHandGUI:
         # Note: Tk bitmap images are unreliable across platforms here, so
         # we stick to text-only buttons (with Unicode where appropriate).
 
-        # Create main container with paned window
+        # Create main container with paned window (vertical sash between control + chart)
         paned = ttk.PanedWindow(self.root, orient='horizontal')
         paned.pack(fill='both', expand=True)
         
-        # Left panel - controls
-        left_frame = ttk.Frame(paned, padding=10)
-        paned.add(left_frame, weight=1)
+        # Left shell with its own vertical splitter (controls vs log)
+        left_outer = ttk.Frame(paned, padding=3)
+        paned.add(left_outer, weight=1)
+        left_splitter = ttk.PanedWindow(left_outer, orient='vertical')
+        left_splitter.pack(fill='both', expand=True)
+        self.left_splitter = left_splitter
+        
+        left_frame = ttk.Frame(left_splitter)
+        left_splitter.add(left_frame, weight=4)
+        log_container = ttk.Frame(left_splitter)
+        left_splitter.add(log_container, weight=1)
+        log_container.columnconfigure(0, weight=1)
+        log_container.rowconfigure(1, weight=1)
         for col in range(6):
             left_frame.grid_columnconfigure(col, weight=1)
+        left_frame.grid_rowconfigure(1, weight=0)
+        left_frame.grid_rowconfigure(2, weight=0)
         
         # Right panel - charts
-        right_frame = ttk.Frame(paned, padding=10)
+        right_frame = ttk.Frame(paned, padding=3)
         paned.add(right_frame, weight=2)
         
         # Title
@@ -1137,16 +1162,16 @@ class AmazingHandGUI:
             finger = FingerControl(
                 parent, name, s1, s2, self.controller, self.on_finger_update
             )
-            finger.frame.grid(row=row, column=col, columnspan=2, padx=5, pady=5, sticky='n')
+            finger.frame.grid(row=row, column=col, columnspan=2, padx=3, pady=2, sticky='nsew')
             self.fingers.append(finger)
 
         # Right-side stacked controls next to thumb (span remaining columns)
         right_controls_frame = ttk.Frame(left_frame)
-        right_controls_frame.grid(row=2, column=2, columnspan=4, padx=(10, 0), pady=5, sticky='nsew')
+        right_controls_frame.grid(row=2, column=2, columnspan=4, padx=(6, 0), pady=2, sticky='nsew')
         
         # Connection options - top of right stack
-        conn_frame = ttk.LabelFrame(right_controls_frame, text="Connection", padding=5)
-        conn_frame.pack(fill='x', expand=True, pady=(0, 5))
+        conn_frame = ttk.LabelFrame(right_controls_frame, text="Connection", padding=3)
+        conn_frame.pack(fill='x', expand=True, pady=(0, 2))
         
         conn_row = ttk.Frame(conn_frame)
         conn_row.pack(fill='x', expand=True)
@@ -1196,8 +1221,8 @@ class AmazingHandGUI:
         attach_tooltip(self.disconnect_btn, "Disconnect from the controller.")
         
         # Global controls - second in right stack
-        control_frame = ttk.LabelFrame(right_controls_frame, text="Global Controls", padding=10)
-        control_frame.pack(fill='x', expand=True, pady=5)
+        control_frame = ttk.LabelFrame(right_controls_frame, text="Global Controls", padding=3)
+        control_frame.pack(fill='x', expand=True, pady=2)
         
         # Preset buttons
         self.open_all_btn = ttk.Button(
@@ -1219,52 +1244,49 @@ class AmazingHandGUI:
         attach_tooltip(self.center_all_btn, "Reset all side-to-side offsets to 0°.")
         
         # Pose management section - middle of right stack
-        pose_mgmt_frame = ttk.LabelFrame(right_controls_frame, text="Pose Management", padding=10)
-        pose_mgmt_frame.pack(fill='x', expand=True, pady=5)
+        pose_mgmt_frame = ttk.LabelFrame(right_controls_frame, text="Pose Management", padding=3)
+        pose_mgmt_frame.pack(fill='x', expand=True, pady=2)
         
-        # First row: existing poses
-        pose_row1 = ttk.Frame(pose_mgmt_frame)
-        pose_row1.pack(fill='x', expand=True, pady=2)
-        
-        ttk.Label(pose_row1, text="Pose:").pack(side='left', padx=(0,2))
+        # Single-row layout for pose selection and creation
         poses_list = load_pose_definitions()
         default_pose = poses_list[0]['name'] if poses_list else ""
         self.pose_var = tk.StringVar(value=default_pose)
+        pose_row = ttk.Frame(pose_mgmt_frame)
+        pose_row.pack(fill='x', expand=True, pady=2)
+        pose_row.columnconfigure(3, weight=1)
+
+        ttk.Label(pose_row, text="Pose:").grid(row=0, column=0, padx=(0,2))
         self.pose_combo = ttk.Combobox(
-            pose_row1,
+            pose_row,
             textvariable=self.pose_var,
             state='readonly',
             width=14,
             values=[s['name'] for s in poses_list] or ["<no poses>"]
         )
-        self.pose_combo.pack(side='left', padx=2)
+        self.pose_combo.grid(row=0, column=1, padx=2)
         attach_tooltip(self.pose_combo, "Select a saved pose.")
 
         self.set_pose_btn = ttk.Button(
-            pose_row1, text="✓ Apply", command=self.set_selected_pose, width=10
+            pose_row, text="✓ Apply", command=self.set_selected_pose, width=10
         )
-        self.set_pose_btn.pack(side='left', padx=5)
+        self.set_pose_btn.grid(row=0, column=2, padx=5)
         attach_tooltip(self.set_pose_btn, "Apply the selected pose to all fingers.")
-        
-        # Second row: add new pose
-        pose_row2 = ttk.Frame(pose_mgmt_frame)
-        pose_row2.pack(fill='x', expand=True, pady=2)
-        
-        ttk.Label(pose_row2, text="Name:").pack(side='left', padx=(0,2))
+
+        ttk.Label(pose_row, text="Name:").grid(row=0, column=3, padx=(10,2), sticky='e')
         self.save_pose_name_var = tk.StringVar()
-        self.save_pose_entry = ttk.Entry(pose_row2, textvariable=self.save_pose_name_var, width=14)
-        self.save_pose_entry.pack(side='left', padx=2)
+        self.save_pose_entry = ttk.Entry(pose_row, textvariable=self.save_pose_name_var, width=14)
+        self.save_pose_entry.grid(row=0, column=4, padx=2)
         attach_tooltip(self.save_pose_entry, "Enter a name for the pose. Avoid special chars: : { } [ ] , & * # ? | - < > = ! % @ ` \" '")
-        
+
         self.save_pose_btn = ttk.Button(
-            pose_row2, text="➕ Add New", command=self.save_pose, width=10
+            pose_row, text="➕ Add New", command=self.save_pose, width=10
         )
-        self.save_pose_btn.pack(side='left', padx=5)
+        self.save_pose_btn.grid(row=0, column=5, padx=5)
         attach_tooltip(self.save_pose_btn, "Save current finger positions as a new pose.")
        
         # Sequence player section - bottom of right stack
-        seq_player_frame = ttk.LabelFrame(right_controls_frame, text="Sequence Player", padding=10)
-        seq_player_frame.pack(fill='x', expand=True, pady=5)
+        seq_player_frame = ttk.LabelFrame(right_controls_frame, text="Sequence Player", padding=3)
+        seq_player_frame.pack(fill='x', expand=True, pady=2)
         
         # First row: sequence selection
         seq_row1 = ttk.Frame(seq_player_frame)
@@ -1323,26 +1345,23 @@ class AmazingHandGUI:
         # Bind keyboard events
         self.root.bind('<Key>', self.on_key_press)
         
-        # Status bar - below all controls
+        # Status bar + log stacked in bottom pane
         self.status_var = tk.StringVar(value="Ready")
         status_bar = ttk.Label(
-            left_frame, textvariable=self.status_var,
+            log_container, textvariable=self.status_var,
             relief='sunken', anchor='w'
         )
-        status_bar.grid(row=5, column=0, columnspan=6, sticky='ew', pady=(10,0))
+        status_bar.grid(row=0, column=0, sticky='ew')
         attach_tooltip(status_bar, "Most recent action, warning, or error message.")
         
         # Log output - bottom, expandable
-        log_frame = ttk.LabelFrame(left_frame, text="Execution Log", padding=5)
-        log_frame.grid(row=6, column=0, columnspan=6, sticky='nsew', pady=(10,0))
-        
-        # Make bottom row expandable
-        left_frame.grid_rowconfigure(6, weight=1)
+        log_frame = ttk.LabelFrame(log_container, text="Execution Log", padding=(3,0,3,3))
+        log_frame.grid(row=1, column=0, sticky='nsew')
         
         log_scroll = ttk.Scrollbar(log_frame)
         log_scroll.pack(side='right', fill='y')
         
-        self.log_text = tk.Text(log_frame, height=8, wrap='word', yscrollcommand=log_scroll.set, state='disabled')
+        self.log_text = tk.Text(log_frame, height=12, wrap='word', yscrollcommand=log_scroll.set, state='disabled')
         self.log_text.pack(side='left', fill='both', expand=True)
         log_scroll.config(command=self.log_text.yview)
         attach_tooltip(self.log_text, "History of key actions and sequence progress (read-only).")
@@ -1367,28 +1386,19 @@ class AmazingHandGUI:
     
     def setup_chart_panel(self, parent):
         """Setup the chart display panel."""
-        # Title
-        chart_title = ttk.Label(
-            parent, text="Servo Monitoring",
-            font=('Arial', 14, 'bold')
-        )
-        chart_title.pack(pady=(5,0))
-        attach_tooltip(chart_title, "Live telemetry from all servos (position, load, temperature, voltage).")
-       
-        # Metric selection & chart controls
-        select_frame = ttk.Frame(parent)
-        select_frame.pack(fill='x', padx=1, pady=(5,2))
+        # Metric selection & chart controls (single row)
+        controls_row = ttk.Frame(parent)
+        controls_row.pack(fill='x', padx=6, pady=(5,4))
 
-        chart_controls_frame = ttk.Frame(select_frame)
-        chart_controls_frame.pack(side='left', padx=5)
-        
-        self.chart_pause_btn = ttk.Button(chart_controls_frame, text="⏸ Pause Chart", command=self.toggle_chart_pause, width=14)
-        self.chart_pause_btn.pack(side='top', pady=1)
+        self.chart_pause_btn = ttk.Button(controls_row, text="⏸ Pause Chart", command=self.toggle_chart_pause, width=14)
+        self.chart_pause_btn.pack(side='left', padx=(0,4))
         attach_tooltip(self.chart_pause_btn, "Stop refreshing the plot without affecting telemetry collection.")
 
-        display_label = ttk.Label(select_frame, text="Display:")
-        display_label.pack(side='left', padx=5)
-        attach_tooltip(display_label, "Select which telemetry metrics to plot (multiple allowed).")
+        ttk.Label(controls_row, text="Display:").pack(side='left', padx=(4,4))
+        self.display_dropdown = ttk.Menubutton(controls_row, text="Display")
+        self.display_dropdown.pack(side='left', padx=(0,8))
+        self.display_menu = tk.Menu(self.display_dropdown, tearoff=0)
+        self.display_dropdown['menu'] = self.display_menu
         
         self.chart_metrics = {
             'current_pos': tk.BooleanVar(value=True),
@@ -1420,21 +1430,21 @@ class AmazingHandGUI:
             'moving': "Plot moving flags (1=moving, 0=idle) for each servo."
         }
         for label, value in metrics:
-            metric_check = ttk.Checkbutton(
-                select_frame, text=label,
-                variable=self.chart_metrics[value],
-                command=self.update_chart
+            var = self.chart_metrics[value]
+            self.display_menu.add_checkbutton(
+                label=label,
+                variable=var,
+                command=self._on_metric_toggle
             )
-            metric_check.pack(side='left', padx=2)
-            attach_tooltip(metric_check, metric_tips.get(value, ""))
+            var.trace_add('write', lambda *_: self._update_display_dropdown_label())
+        attach_tooltip(self.display_dropdown, "Choose telemetry metrics to plot.")
+        self._update_display_dropdown_label()
 
         
         # Chart mode and servo selection controls
-        mode_frame = ttk.Frame(parent)
-        mode_frame.pack(fill='x', padx=5, pady=(5,4))
-        ttk.Label(mode_frame, text="Chart Mode:").pack(side='left', padx=(0,4))
+        ttk.Label(controls_row, text="Chart Mode:").pack(side='left', padx=(4,4))
         mode_combo = ttk.Combobox(
-            mode_frame,
+            controls_row,
             textvariable=self.chart_mode,
             values=['Multi-Servo', 'Scope'],
             width=12,
@@ -1445,10 +1455,10 @@ class AmazingHandGUI:
         mode_combo.bind('<<ComboboxSelected>>', lambda _e: self._on_chart_mode_change())
         self.chart_mode.trace_add('write', lambda *_: self._on_chart_mode_change())
         self.scope_servo_label_pack = {'side': 'left', 'padx': (0, 4)}
-        self.scope_servo_label = ttk.Label(mode_frame, text="Scope Servo:")
+        self.scope_servo_label = ttk.Label(controls_row, text="Scope Servo:")
         self.scope_servo_label.pack(**self.scope_servo_label_pack)
         self.scope_servo_combo = ttk.Combobox(
-            mode_frame,
+            controls_row,
             textvariable=self.scope_servo_var,
             values=[str(i) for i in range(1, 9)],
             width=4,
@@ -1461,52 +1471,56 @@ class AmazingHandGUI:
         self.scope_servo_var.trace_add('write', lambda *_: self._on_scope_servo_change())
         self._update_scope_servo_visibility()
         
-        # Servo selection
-        servos_label = ttk.Label(mode_frame, text="Servos:")
-        servos_label.pack(side='left', padx=5)
-        attach_tooltip(servos_label, "Toggle which servo traces are visible.")
-        
+        # Servo selection dropdown and action buttons
+        ttk.Label(controls_row, text="Servos:").pack(side='left', padx=(6,4))
+        dropdown_container = ttk.Frame(controls_row)
+        dropdown_container.pack(side='left')
         self.servo_visible = [tk.BooleanVar(value=True) for _ in range(8)]
+        self.servo_dropdown = ttk.Menubutton(dropdown_container, text="Servos")
+        self.servo_dropdown.pack(side='left')
+        self.servo_menu = tk.Menu(self.servo_dropdown, tearoff=0)
+        self.servo_dropdown['menu'] = self.servo_menu
         for i in range(8):
-            servo_check = ttk.Checkbutton(
-                mode_frame, text=f"S{i+1}",
-                variable=self.servo_visible[i],
-                command=self.update_chart
+            var = self.servo_visible[i]
+            self.servo_menu.add_checkbutton(
+                label=f"S{i+1}",
+                variable=var,
+                command=self._on_servo_toggle
             )
-            servo_check.pack(side='left', padx=2)
-            attach_tooltip(servo_check, f"Show/hide servo {i+1} in the plot.")
+            var.trace_add('write', lambda *_: self._update_servo_dropdown_label())
+        attach_tooltip(self.servo_dropdown, "Select which servo traces are visible.")
+        self._update_servo_dropdown_label()
         
-        # Add select/deselect all buttons
-        all_btn = ttk.Button(mode_frame, text="✓ All", command=self.select_all_servos, width=6)
-        all_btn.pack(side='left', padx=5)
+        controls_btn_group = ttk.Frame(controls_row)
+        controls_btn_group.pack(side='left', padx=(8,0))
+        
+        all_btn = ttk.Button(controls_btn_group, text="✓ All", command=self.select_all_servos, width=6)
+        all_btn.pack(side='left', padx=2)
         attach_tooltip(all_btn, "Enable all servo traces.")
-        none_btn = ttk.Button(mode_frame, text="✕ None", command=self.deselect_all_servos, width=6)
+        none_btn = ttk.Button(controls_btn_group, text="✕ None", command=self.deselect_all_servos, width=6)
         none_btn.pack(side='left', padx=2)
         attach_tooltip(none_btn, "Hide all servo traces (useful before selecting a subset).")
         
-        # Rolling chart option
         self.rolling_var = tk.BooleanVar(value=True)
         rolling_check = ttk.Checkbutton(
-            mode_frame, text="Rolling",
+            controls_btn_group, text="Rolling",
             variable=self.rolling_var,
             command=self.toggle_rolling
         )
         rolling_check.pack(side='left', padx=10)
         attach_tooltip(rolling_check, "Limit chart to latest samples instead of growing indefinitely.")
         
-        # Clear chart button
-        clear_btn = ttk.Button(mode_frame, text="⌫ Clear", command=self.clear_chart_data, width=6)
+        clear_btn = ttk.Button(controls_btn_group, text="⌫ Clear", command=self.clear_chart_data, width=6)
         clear_btn.pack(side='left', padx=2)
         attach_tooltip(clear_btn, "Reset collected telemetry and start fresh.")
         
         # Chart and slider layout container
         chart_container = ttk.Frame(parent)
         chart_container.pack(fill='both', expand=True, padx=5, pady=(0,5))
-        
         # Right side - Y axis sliders (vertical, 100% height)
         y_sliders_frame = ttk.Frame(chart_container, width=30)
-        y_sliders_frame.pack(side='right', fill='y', padx=(5,0))
-        y_sliders_frame.pack_propagate(False)
+
+        # Chart and slider layout container
         
         # Y Zoom slider (top half)
         y_zoom_container = ttk.Frame(y_sliders_frame)
@@ -1605,17 +1619,20 @@ class AmazingHandGUI:
         style.configure(
             'Feedback.Header.TLabel',
             background='#f2f2f2',
-            font=('TkDefaultFont', 9, 'bold')
+            font=('TkDefaultFont', 9, 'bold'),
+            padding=(6, 6)
         )
         style.configure(
             'Feedback.Metric.TLabel',
             background='#fafafa',
-            font=('TkDefaultFont', 9, 'bold')
+            font=('TkDefaultFont', 9, 'bold'),
+            padding=(6, 6)
         )
         style.configure(
             'Feedback.Cell.TLabel',
             background='#ffffff',
-            font=('TkDefaultFont', 9)
+            font=('TkDefaultFont', 9),
+            padding=(6, 4)
         )
         self._feedback_styles_ready = True
 
@@ -1626,22 +1643,30 @@ class AmazingHandGUI:
                 self.feedback_frame.destroy()
             except Exception:
                 pass
-        self.feedback_frame = ttk.LabelFrame(parent, text="Servo Feedback", padding=6)
+        self.feedback_frame = ttk.LabelFrame(parent, text="Servo Feedback", padding=3)
         self.feedback_frame.pack(fill='both', padx=5, pady=(0, 5), expand=True)
-
-        header = ttk.Label(
-            self.feedback_frame,
-            text="Servo Feedback (All Servos)",
-            font=('Arial', 11, 'bold')
-        )
-        header.pack(anchor='w', pady=(0, 4))
-        attach_tooltip(header, "Live telemetry table with servos on columns and metrics on rows.")
 
         self._ensure_feedback_styles()
         self.feedback_cells = {}
+        table_container = ttk.Frame(self.feedback_frame)
+        table_container.pack(fill='both', expand=True)
+        self.feedback_canvas = tk.Canvas(table_container, highlightthickness=0)
+        self.feedback_canvas.pack(side='left', fill='both', expand=True)
+        scrollbar = ttk.Scrollbar(table_container, orient='vertical', command=self.feedback_canvas.yview)
+        scrollbar.pack(side='right', fill='y')
+        self.feedback_canvas.configure(yscrollcommand=scrollbar.set)
 
-        grid_frame = ttk.Frame(self.feedback_frame)
-        grid_frame.pack(fill='both', expand=True)
+        grid_frame = ttk.Frame(self.feedback_canvas)
+        self.feedback_table_window = self.feedback_canvas.create_window((0, 0), window=grid_frame, anchor='nw')
+
+        def _sync_feedback_scroll(_event=None):
+            self.feedback_canvas.configure(scrollregion=self.feedback_canvas.bbox('all'))
+
+        grid_frame.bind('<Configure>', _sync_feedback_scroll)
+        self.feedback_canvas.bind(
+            '<Configure>',
+            lambda event: self.feedback_canvas.itemconfigure(self.feedback_table_window, width=event.width)
+        )
 
         headings = ['Metric'] + [f'S{i}' for i in range(1, 9)]
         for col_index, heading in enumerate(headings):
@@ -1654,7 +1679,7 @@ class AmazingHandGUI:
             lbl.grid(row=0, column=col_index, sticky='nsew')
             attach_tooltip(lbl, f"Column heading: {heading}")
             grid_frame.columnconfigure(col_index, weight=1)
-        grid_frame.rowconfigure(0, weight=0)
+        grid_frame.rowconfigure(0, weight=0, minsize=30)
 
         for row_idx, (key, label, tip) in enumerate(self.feedback_metric_specs, start=1):
             row_label = ttk.Label(
@@ -1665,7 +1690,7 @@ class AmazingHandGUI:
             )
             row_label.grid(row=row_idx, column=0, sticky='nsew')
             attach_tooltip(row_label, tip)
-            grid_frame.rowconfigure(row_idx, weight=1)
+            grid_frame.rowconfigure(row_idx, weight=1, minsize=28)
 
             for col in range(1, len(headings)):
                 cell = ttk.Label(
@@ -1705,6 +1730,42 @@ class AmazingHandGUI:
                 label.pack_forget()
             if combo and combo.winfo_manager():
                 combo.pack_forget()
+
+    def _on_metric_toggle(self):
+        self._update_display_dropdown_label()
+        self.update_chart()
+
+    def _update_display_dropdown_label(self):
+        dropdown = getattr(self, 'display_dropdown', None)
+        if dropdown is None:
+            return
+        total = len(self.chart_metrics)
+        count = sum(1 for var in self.chart_metrics.values() if var.get())
+        if count == 0:
+            text = "Display (none)"
+        elif count == total:
+            text = "Display (all)"
+        else:
+            text = f"Display ({count})"
+        dropdown.config(text=text)
+
+    def _on_servo_toggle(self):
+        self._update_servo_dropdown_label()
+        self.update_chart()
+
+    def _update_servo_dropdown_label(self):
+        dropdown = getattr(self, 'servo_dropdown', None)
+        if dropdown is None:
+            return
+        total = len(self.servo_visible)
+        count = sum(1 for var in self.servo_visible if var.get())
+        if count == 0:
+            text = "Servos (none)"
+        elif count == total:
+            text = "Servos (all)"
+        else:
+            text = f"Servos ({count})"
+        dropdown.config(text=text)
 
     def _on_chart_mode_change(self):
         """Handle chart mode combo box changes."""
@@ -2847,7 +2908,7 @@ class AmazingHandGUI:
             dialog.title("Sequence Management")
             dialog.geometry("900x700")
             
-            main_container = ttk.Frame(dialog, padding=10)
+            main_container = ttk.Frame(dialog, padding=3)
             main_container.pack(fill='both', expand=True)
             
             # Two-panel layout
@@ -2993,7 +3054,7 @@ class AmazingHandGUI:
             cols.pack(fill='both', expand=True)
             
             # Available poses
-            poses_frame = ttk.LabelFrame(cols, text="Available Poses", padding=10)
+            poses_frame = ttk.LabelFrame(cols, text="Available Poses", padding=3)
             poses_frame.pack(side='left', fill='both', expand=True, padx=(0,5))
             
             poses_listbox = tk.Listbox(poses_frame, height=15)
@@ -3003,7 +3064,7 @@ class AmazingHandGUI:
                 poses_listbox.insert(tk.END, pose_name)
             
             # Sequence being built
-            builder_frame = ttk.LabelFrame(cols, text="Sequence Steps", padding=10)
+            builder_frame = ttk.LabelFrame(cols, text="Sequence Steps", padding=3)
             builder_frame.pack(side='left', fill='both', expand=True, padx=(5,0))
             
             builder_listbox = tk.Listbox(builder_frame, height=15)
